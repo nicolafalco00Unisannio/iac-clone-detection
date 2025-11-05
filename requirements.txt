@@ -1,0 +1,6 @@
+python-hcl2 
+ruamel.yaml
+pyyaml
+zss
+pyvis
+networkx
