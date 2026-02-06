@@ -26,6 +26,7 @@ def find_iac_files(root, limit=None):
         'versions.tf', 
         'provider.tf', 
         'backend.tf', 
+        'context.tf',
         'terraform.tfvars'
     }
     

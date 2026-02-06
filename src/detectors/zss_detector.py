@@ -15,6 +15,7 @@ from itertools import combinations
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None):
+    logging.info(f"Finding files in {root_dir} with limit {limit}.")
     files = find_iac_files(root_dir, limit)
     logging.info(f"Found {len(files)} files. Starting parsing and bucketing...")
     
@@ -28,9 +29,7 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None):
         
         tree = to_zss_tree(data)
         
-        # --- NUOVO FILTRO ---
-        # Se l'albero è troppo piccolo (es. < 15 nodi), è boilerplate. Ignoralo.
-        # Il tuo esempio della variabile "config" avrà circa 4-5 nodi.
+        # Se l'albero è troppo piccolo (es. < 100 nodi), è boilerplate.
         if count_nodes(tree) < 100: 
             continue 
         # --------------------
@@ -48,15 +47,14 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None):
     clone_pairs = []
     
     # 2. Comparison Phase (Parallelizzata)
-    # Calcoliamo il numero totale di task per la progress bar (opzionale)
     total_comparisons = sum(len(list(combinations(v, 2))) for v in active_buckets.values())
-    logging.info(f"Estimated comparisons required: {total_comparisons} (instead of classic N^2)")
+    logging.info(f"Estimated comparisons required: {total_comparisons}.")
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         
         for sig, items in active_buckets.items():
-            # Genera coppie SOLO all'interno dello stesso bucket
+            # Genera coppie all'interno dello stesso bucket
             pairs = combinations(items, 2)
             
             for (p1, t1), (p2, t2) in pairs:
