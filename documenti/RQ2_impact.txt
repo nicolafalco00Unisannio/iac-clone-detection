@@ -1,0 +1,13 @@
+https://www.hashicorp.com/en/blog/detecting-and-managing-drift-with-terraform
+
+# Configuration Drift
+I cloni tipo III portano a questo problema: ad esempio, si copia la configurazione per l'ambiente dev per creare prod; nel tempo si fanno dei piccoli cambiamenti a dev che però non vengono riportati in prod. Ciò farà divergere gli ambienti, antiteticamente al concetto di IaC che prevede ambienti consistenti e riproducibili. 
+
+# Cambia uno, ignora gli altri
+Le impostazioni di sicurezza in IaC sono distribuiti in molte risorse. Ad esempio, si scopre una vulnerabilità che richiede la chiusura di una porta su tutti i web server: questo problema viene risolto sul blocco principale ma non sui cloni tipo I e II presenti in altri files. Ciò vuol dire che l'infrastruttura "messa in sicurezza" ha comunque delle backdoor aperte.
+
+# Paralisi sul refactoring
+Nel codice tradizionale, il refactoring di una funzione duplicata è *generalmente* sicuro, basta cambiare il codice. In strumenti come Terraform, le risorse sono tracciate in uno State File con il loro indirizzo distintivo. Se si prova ad eliminare i cloni spostandoli in un modulo riutilizzabile, Terraform lo vede cone un nuovo indirizzo, e quindi potrebbe eliminare la vecchia risorsa e crearne una nuova. Ciò porta ad una "paralisi" a fronte di possibilità di refactoring di cloni poiché richiederebbe una manipolazione dello stato per evitare downtime, portando a bloat di risorse permanente.
+
+# Bloat di risorse e spreco finanziario
+Uno sviluppatore ha bisogno di un database e copia un blocco (clone tipo I o II) che include anche un grosso load balancer ed altre feature di logging di cui non ha bisogno: verrà messa in piedi più infrastruttura di quanta ne sia necessaria... e ricordiamo che l'infrastruttura solitamente viene pagata in base all'utilizzo.

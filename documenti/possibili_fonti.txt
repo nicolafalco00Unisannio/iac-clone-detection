@@ -1,0 +1,38 @@
+Comparison and evaluation of code clone detection techniques and tools: A qualitative approach 
+(questo definisce i classici cloni di tipo I, II, III e IV)
+https://www.sciencedirect.com/science/article/pii/S0167642309000367
+
+Type-2 Code Clone Detection for Dockerfiles (esempio di studio empirico su codice infrastrutturale)
+https://ieeexplore.ieee.org/document/9679789
+
+Comparison and Evaluation of Clone Detection Tools 
+(questo in merito al tool di clone detection)
+https://ieeexplore.ieee.org/document/4288192
+
+An empirical study of build maintenance effort
+(sostanzialmente dice che i cloni di configurazioni sono più difficili da manutenere dei cloni standard)
+https://dl.acm.org/doi/abs/10.1145/1985793.1985813
+
+Do Code Clones Matter?
+(questo per definire i rischi di sicurezza)
+https://arxiv.org/abs/1701.05472
+
+An Empirical Study on the Characteristics of Reusable Code Clones
+https://dl.acm.org/doi/10.1145/3793251
+
+Studying the Impact of Clones on Software Defects
+https://ieeexplore.ieee.org/document/5645480
+
+Towards an Empirical Analysis of Code Cloning and Code Reuse in CI/CD Ecosystems
+https://ceur-ws.org/Vol-3941/BENEVOL2024_TECH_paper8.pdf
+
+Bug Propagation through Code Cloning: An Empirical Study
+https://ieeexplore.ieee.org/abstract/document/8094424
+
+On the Prevalence, Co-occurrence, and Impact of Infrastructure-as-Code Smells
+https://ieeexplore.ieee.org/document/10589858
+
+
+A Defect Taxonomy for Infrastructure as Code: A Replication Study
+https://arxiv.org/pdf/2505.01568
+

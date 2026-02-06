@@ -1,0 +1,3 @@
+RQ1: How do we classify code clones in IaC?
+RQ2: What is the impact of code clones in IaC?
+RQ3: Which clone types are more common?
