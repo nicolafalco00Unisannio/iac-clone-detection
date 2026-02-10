@@ -15,9 +15,9 @@ from itertools import combinations
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None):
-    logging.info(f"Finding files in {root_dir} with limit {limit}.")
+    logging.debug(f"Finding files in {root_dir} with limit {limit}.")
     files = find_iac_files(root_dir, limit)
-    logging.info(f"Found {len(files)} files. Starting parsing and bucketing...")
+    logging.debug(f"Found {len(files)} files. Starting parsing and bucketing...")
     
     buckets = defaultdict(list)
     skipped = 0
@@ -25,49 +25,47 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None):
     # 1. Parsing & Bucketing Phase
     for path in files:
         data = parse_file(path)
-        if data is None: continue
+        if data is None: 
+            continue
         
         tree = to_zss_tree(data)
+        size = count_nodes(tree)
         
         # Se l'albero è troppo piccolo (es. < 100 nodi), è boilerplate.
-        if count_nodes(tree) < 100: 
+        if size < 100: 
             continue 
         # --------------------
 
         sig = get_ast_signature(data)
-        buckets[sig].append((path, tree))
+        buckets[sig].append((path, tree, size))
         
-    logging.info(f"Parsing complete. Skipped {skipped} files.")
-    logging.info(f"Created {len(buckets)} distinct buckets based on structure.")
+    logging.debug(f"Parsing complete. Skipped {skipped} files.")
+    logging.debug(f"Created {len(buckets)} distinct buckets based on structure.")
     
     # Filtriamo bucket con meno di 2 file (nessun clone possibile)
     active_buckets = {k: v for k, v in buckets.items() if len(v) > 1}
-    logging.info(f"Active buckets to process: {len(active_buckets)}")
+    logging.debug(f"Active buckets to process: {len(active_buckets)}")
 
     clone_pairs = []
     
     # 2. Comparison Phase (Parallelizzata)
     total_comparisons = sum(len(list(combinations(v, 2))) for v in active_buckets.values())
-    logging.info(f"Estimated comparisons required: {total_comparisons}.")
+    logging.debug(f"Estimated comparisons required: {total_comparisons}.")
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        
+    def task_iter():
         for sig, items in active_buckets.items():
-            # Genera coppie all'interno dello stesso bucket
-            pairs = combinations(items, 2)
-            
-            for (p1, t1), (p2, t2) in pairs:
-                # Se sono lo stesso file (es. symlink o errore path), salta
-                if p1 == p2: continue
-                
-                futures.append(executor.submit(compute_distance_task, (p1, t1, p2, t2, threshold)))
-        
-        # Raccolta risultati man mano che finiscono
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
+            for (p1, t1, s1), (p2, t2, s2) in combinations(items, 2):
+                if p1 == p2:
+                    continue
+                # TED lower bound: distance >= |size1 - size2|
+                if abs(s1 - s2) > threshold:
+                    continue
+                yield (p1, t1, p2, t2, threshold)
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for res in executor.map(compute_distance_task, task_iter(), chunksize=50):
             if res:
                 clone_pairs.append(res)
                 
-    logging.info(f"Detection complete. Found {len(clone_pairs)} clone pairs.")
+    logging.debug(f"Detection complete. Found {len(clone_pairs)} clone pairs.")
     return clone_pairs
