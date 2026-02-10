@@ -9,7 +9,7 @@ from src.analysis.refactoring import (
     _generate_smart_module_call,
     _generate_tfvars_refactor,
 )
-from src.analysis.diff_analyzer import _identify_param_differences
+from src.analysis.diff_analyzer import _identify_param_differences, classify_clone_type, get_clone_statistics
 
 import difflib
 import webbrowser
@@ -87,8 +87,10 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '.diff_sub { background-color: #f8d7da; }',
         'pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.9rem; }',
         'code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 3px; font-family: "Courier New", monospace; }',
-        '.refactoring { background: #e7f3ff; padding: 1rem; border-radius: 4px; margin: 1rem 0; border-left: 4px solid #2196F3; }',
-        '.graph-container { width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; }',
+        'details.refactoring-details { background: #e7f3ff; border: 1px solid #b3d7ff; border-radius: 4px; padding: 0.5rem; margin-top: 1rem; }',
+        'details.refactoring-details summary { cursor: pointer; font-weight: bold; color: #0056b3; outline: none; padding: 0.5rem; }',
+        'details.refactoring-details summary:hover { background-color: #d0e7ff; border-radius: 4px; }',
+        '.refactoring-content { padding: 1rem; border-top: 1px solid #b3d7ff; margin-top: 0.5rem; background: white; border-radius: 0 0 4px 4px; }',
         'footer { text-align: center; padding: 2rem; color: #666; font-size: 0.9rem; }',
         '</style>',
         '</head><body>',
@@ -105,6 +107,8 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
     total_groups = len(clone_groups)
     total_pairs = len(clone_pairs)
     
+    type_stats = get_clone_statistics(clone_pairs)
+
     html_parts.extend([
         '<div class="stats">',
         '<div class="stat-card"><h3>{}</h3><p>Clone Groups</p></div>'.format(total_groups),
@@ -112,41 +116,60 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '<div class="stat-card"><h3>{}</h3><p>Files Involved</p></div>'.format(total_files),
         '</div>'
     ])
+    
+    # Detailed Type Stats
+    html_parts.extend([
+        '<div class="stats">',
+        '<div class="stat-card"><h3 style="color:#28a745">{}</h3><p>Type 1 (Exact)</p></div>'.format(type_stats.get("Type 1 (Exact Clone)", 0)),
+        '<div class="stat-card"><h3 style="color:#ffc107">{}</h3><p>Type 2 (Param)</p></div>'.format(type_stats.get("Type 2 (Parameterized Clone)", 0)),
+        '<div class="stat-card"><h3 style="color:#dc3545">{}</h3><p>Type 3 (Near-miss)</p></div>'.format(type_stats.get("Type 3 (Near-miss Clone)", 0)),
+        '</div>'
+    ])
 
     # Navigation
     html_parts.extend([
         '<nav>',
-        '<a href="#graph"> Graph View</a>',
-        '<a href="#diffs"> Code Diffs</a>',
-        '<a href="#refactoring"> Refactoring</a>',
+        '<a href="#diffs"> Code Diffs & Refactoring</a>',
         '</nav>'
     ])
-
-    # Generate the Pyvis network for embedding
-    html_parts.append('<section id="graph" class="section"><h2>Clone Graph Visualization</h2>')
-    
-    graph_filename = _generate_clone_graph_html(clone_pairs)
-    
-    if graph_filename:
-        html_parts.append(f"""
-        <p>Click on nodes to view file paths. Edge thickness represents similarity (thicker = more similar).</p>
-        <iframe src="{graph_filename}" width="100%" height="600" style="border: none;"></iframe>
-        """)
-    else:
-        html_parts.append("<p>Not enough clone pairs found to generate a meaningful graph visualization.</p>")
-        
-    html_parts.append('</section>')
 
     # Code Diffs Section
     html_parts.extend([
         '<div class="section" id="diffs">',
-        '<h2> Side-by-Side Code Comparisons</h2>'
+        '<h2> Code Comparisons & Refactoring Suggestions</h2>'
     ])
 
     html_diff = difflib.HtmlDiff(tabsize=4, wrapcolumn=50)
     for i, group in enumerate(clone_groups):
+        paths = sorted(list(group))
+        
+        # Determine group type dynamically based on the first pair
+        # (Assuming transitivity: if A~B is Type 2, and B~C is Type 2, group is likely Type 2)
+        group_type = "Unknown"
+        group_max_dist = 0
+        
+        if len(paths) >= 2:
+            p1, p2 = paths[0], paths[1]
+            
+            # Find the specific distance for this pair
+            dist = 0
+            for start, end, d in clone_pairs:
+                if (start == p1 and end == p2) or (start == p2 and end == p1):
+                    dist = d
+                    break
+            
+            group_max_dist = dist
+            
+            # Parse only ONCE here for classification
+            try:
+                ast1 = parse_file(p1)
+                ast2 = parse_file(p2)
+                group_type = classify_clone_type(dist, ast1, ast2)
+            except:
+                group_type = classify_clone_type(dist) # Fallback
+
         html_parts.append(f'<div class="clone-group">')
-        html_parts.append(f'<h3>Clone Group {i+1}</h3>')
+        html_parts.append(f'<h3>Clone Group {i+1} <span style="font-size:0.6em; color:#666; border:1px solid #ccc; padding:2px 6px; border-radius:4px; vertical-align:middle; margin-left:10px;">{group_type}</span></h3>')
         html_parts.append('<ul class="file-list">')
         for path in sorted(list(group)):
             html_parts.append(f'<li>{path}</li>')
@@ -170,141 +193,127 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
             except Exception as e:
                 html_parts.append(f'<p> Could not generate diff: {e}</p>')
         
-        html_parts.append('</div>')
-    
-    html_parts.append('</div>')
-
-# 4. Refactoring Suggestions (UPDATED SECTION)
-    html_parts.append('<section id="refactoring" class="section"><h2>4. Refactoring Suggestions</h2>')
-
-    if clone_groups:
-        for i, group in enumerate(clone_groups):
-            if len(group) < 2:
-                continue
-
+        # --- REFACTORING SUGGESTION LOGIC (Embedded) ---
+        if len(group) >= 2:
             paths = sorted(list(group))
             path1, path2 = paths[0], paths[1]
             module_name = f"common_module_{i+1}"
-
+            
+            html_parts.append('<details class="refactoring-details"><summary>View Refactoring Suggestion</summary><div class="refactoring-content">')
+            
             try:
-                ast1 = parse_file(path1)
-                ast2 = parse_file(path2)
-            except Exception as e:
-                html_parts.append(f'<div class="refactoring-block"><h4>Error analyzing group {i+1}</h4><p>Failed to parse AST for file pair: {e}</p></div>')
-                continue
-
-            if ast1 and ast2:
-                diff_map = _identify_param_differences(ast1, ast2)
-
-                # If identical: suggest dedup
-                if not diff_map:
+                # Type 3 check: If structural differences are too large, skip automated refactoring
+                if "Type 3" in group_type:
                     html_parts.append(
-                        f'<div class="refactoring-block"><h4>Refactoring Suggestion for Group {i+1}</h4>'
-                        f'<p>Files {path1.name} and {path2.name} appear structurally identical. Recommend simple file deduplication.</p></div>'
+                        f'<h4>Manual Refactoring Recommended</h4>'
+                        f'<p>These files are classified as <strong>Near-miss Clones</strong> (Tree Edit Distance: {group_max_dist}).</p>'
+                        f'<p>They differ structurally (e.g., extra resources or blocks), making automated refactoring unsafe.</p>'
+                        f'<p>Review the diffs above to identify the common core.</p>'
+                        f'<p>Extract the common subset of resources into a module manually.</p>'
                     )
-                    continue
+                else:
+                    ast1 = parse_file(path1)
+                    ast2 = parse_file(path2)
 
-                # NEW: if only a tiny number of differing params, a module is usually not worth it
-                if len(diff_map) < 2:
-                    only_path = next(iter(diff_map.keys()))
+                    if ast1 and ast2:
+                        diff_map = _identify_param_differences(ast1, ast2)
 
-                    (
-                        variables_tf,
-                        left_main_tf,
-                        right_main_tf,
-                        left_tfvars,
-                        right_tfvars,
-                        var_map,
-                    ) = _generate_tfvars_refactor(ast1, ast2, diff_map)
+                        if not diff_map:
+                            html_parts.append(
+                                f'<h4>Simple Deduplication</h4>'
+                                f'<p>Files {path1.name} and {path2.name} appear structurally identical. Recommend simple file deduplication.</p>'
+                            )
+                        
+                        elif len(diff_map) < 2:
+                             # TFVars Strategy
+                            only_path = next(iter(diff_map.keys()))
 
-                    left_tfvars_name = _tfvars_name_for(path1)
-                    right_tfvars_name = _tfvars_name_for(path2)
+                            (
+                                variables_tf,
+                                left_main_tf,
+                                right_main_tf,
+                                left_tfvars,
+                                right_tfvars,
+                                var_map,
+                            ) = _generate_tfvars_refactor(ast1, ast2, diff_map)
 
-                    left_apply = f"terraform apply -var-file={left_tfvars_name}" if _tfvars_has_assignments(left_tfvars) else "terraform apply"
-                    right_apply = f"terraform apply -var-file={right_tfvars_name}" if _tfvars_has_assignments(right_tfvars) else "terraform apply"
+                            left_tfvars_name = _tfvars_name_for(path1)
+                            right_tfvars_name = _tfvars_name_for(path2)
+                            
+                            left_apply = f"terraform apply -var-file={left_tfvars_name}" if _tfvars_has_assignments(left_tfvars) else "terraform apply"
+                            right_apply = f"terraform apply -var-file={right_tfvars_name}" if _tfvars_has_assignments(right_tfvars) else "terraform apply"
 
-                    html_block = f"""
-                    <div class="refactoring-block">
-                        <h4>Refactoring Suggestion for Group {i+1} ({len(group)} files)</h4>
-                        <p><strong>Prototype Files:</strong> <code>{path1.name}</code> and <code>{path2.name}</code>.
-                        Detected <strong>{len(diff_map)}</strong> differing parameter (<code>{only_path}</code>).</p>
+                            html_parts.append(f"""
+                                <h4>Refactoring Strategy: .tfvars Parameterization</h4>
+                                <p>Detected <strong>{len(diff_map)}</strong> differing parameter (<code>{only_path}</code>).</p>
 
-                        <p><strong>Automated refactor chosen:</strong> <code>.tfvars</code>-based parameterization.</p>
+                                <h5>Generated <code>variables.tf</code></h5>
+                                <div class="code-block"><pre>{variables_tf}</pre></div>
 
-                        <h5> Generated <code>variables.tf</code></h5>
-                        <div class="code-block"><pre>{variables_tf}</pre></div>
+                                <h5>Updated <code>{path1.name}</code></h5>
+                                <div class="code-block"><pre>{left_main_tf}</pre></div>
 
-                        <h5> Updated <code>{path1.name}</code> (parameterized)</h5>
-                        <div class="code-block"><pre>{left_main_tf}</pre></div>
+                                <h5>Updated <code>{path2.name}</code></h5>
+                                <div class="code-block"><pre>{right_main_tf}</pre></div>
 
-                        <h5> Updated <code>{path2.name}</code> (parameterized)</h5>
-                        <div class="code-block"><pre>{right_main_tf}</pre></div>
+                                <h5>Generated <code>{left_tfvars_name}</code></h5>
+                                <div class="code-block"><pre>{left_tfvars}</pre></div>
+                                
+                                <h5>Generated <code>{right_tfvars_name}</code></h5>
+                                <div class="code-block"><pre>{right_tfvars}</pre></div>
 
-                        <h5> Generated <code>{left_tfvars_name}</code></h5>
-                        <div class="code-block"><pre>{left_tfvars}</pre></div>
+                                <h5>How to apply</h5>
+                                <ul>
+                                    <li>Apply left: <code>{left_apply}</code></li>
+                                    <li>Apply right: <code>{right_apply}</code></li>
+                                </ul>
+                            """)
 
-                        <h5> Generated <code>{right_tfvars_name}</code></h5>
-                        <div class="code-block"><pre>{right_tfvars}</pre></div>
+                        else:
+                            # Module Strategy
+                            var_tf, main_tf, var_map, passthrough_vars = _generate_smart_module_tf(ast1, diff_map)
+                            call_1 = _generate_smart_module_call(module_name, diff_map, var_map, "left", passthrough_vars)
+                            call_2 = _generate_smart_module_call(module_name, diff_map, var_map, "right", passthrough_vars)
 
-                        <h5>How to apply</h5>
-                        <ul>
-                            <li>Apply left: <code>{left_apply}</code></li>
-                            <li>Apply right: <code>{right_apply}</code></li>
-                        </ul>
-                    </div>
-                    """
-                    html_parts.append(html_block)
-                    continue
+                            html_parts.append(f"""
+                                <h4>Refactoring Strategy: Module Extraction</h4>
+                                <p>Detected <strong>{len(diff_map)}</strong> differing parameters.</p>
 
-                # Generate module files (now also includes pass-through vars)
-                var_tf, main_tf, var_map, passthrough_vars = _generate_smart_module_tf(ast1, diff_map)
+                                <h5>Proposed New Module Structure (<code>./modules/{module_name}</code>)</h5>
+                                <div class="code-container">
+                                    <div class="code-section">
+                                        <h5>variables.tf</h5>
+                                        <div class="code-block"><pre>{var_tf}</pre></div>
+                                    </div>
+                                    <div class="code-section">
+                                        <h5>main.tf (Abstracted Logic)</h5>
+                                        <div class="code-block"><pre>{main_tf}</pre></div>
+                                    </div>
+                                </div>
 
-                # Generate calls (now passes through existing var.* dependencies)
-                call_1 = _generate_smart_module_call(module_name, diff_map, var_map, "left", passthrough_vars)
-                call_2 = _generate_smart_module_call(module_name, diff_map, var_map, "right", passthrough_vars)
+                                <h5>Replacement Code</h5>
+                                <div class="code-container">
+                                    <div class="code-section">
+                                        <h5>Replaces original code in <code>{path1.name}</code></h5>
+                                        <div class="code-block"><pre>{call_1}</pre></div>
+                                    </div>
+                                    <div class="code-section">
+                                        <h5>Replaces original code in <code>{path2.name}</code></h5>
+                                        <div class="code-block"><pre>{call_2}</pre></div>
+                                    </div>
+                                </div>
+                            """)
+                    else:
+                         html_parts.append(f'<p>Could not parse files for refactoring analysis.</p>')
+            
+            except Exception as e:
+                html_parts.append(f'<p>Error parsing or analyzing ASTs for refactoring: {e}</p>')
 
-                # 3. Format into HTML
-                html_block = f"""
-                <div class="refactoring-block">
-                    <h4>Refactoring Suggestion for Group {i+1} ({len(group)} files)</h4>
-                    <p><strong>Prototype Files:</strong> <code>{path1.name}</code> and <code>{path2.name}</code>. Detected <strong>{len(diff_map)}</strong> parameters that differ.</p>
-
-                    <h5> Proposed New Module Structure (<code>./modules/{module_name}</code>)</h5>
-                    <div class="code-container">
-                        <div class="code-section">
-                            <h5>variables.tf</h5>
-                            <div class="code-block"><pre>{var_tf}</pre></div>
-                        </div>
-                        <div class="code-section">
-                            <h5>main.tf (Abstracted Logic)</h5>
-                            <div class="code-block"><pre>{main_tf}</pre></div>
-                        </div>
-                    </div>
-
-                    <h5> Replacement Code</h5>
-                    <div class="code-container">
-                        <div class="code-section">
-                            <h5>Replaces original code in <code>{path1.name}</code></h5>
-                            <div class="code-block"><pre>{call_1}</pre></div>
-                        </div>
-                        <div class="code-section">
-                            <h5>Replaces original code in <code>{path2.name}</code></h5>
-                            <div class="code-block"><pre>{call_2}</pre></div>
-                        </div>
-                    </div>
-                </div>
-                """
-                html_parts.append(html_block)
-            else:
-                html_parts.append(f'<div class="refactoring-block"><h4>Refactoring Suggestion for Group {i+1}</h4><p>Could not parse both files for structural analysis.</p></div>')
-
-    else:
-        html_parts.append("<p>No clone groups found to suggest refactoring.</p>")
+            html_parts.append('</div></details>')
         
-    html_parts.append('</section>') # end section
-
-    # ... (Closing HTML tags) ...
-    html_parts.append('</div></body></html>')
+        html_parts.append('</div>')
+    
+    html_parts.append('</div>') # Close container
 
     # Write the file
     with open(output_filename, 'w', encoding='utf-8') as f:
