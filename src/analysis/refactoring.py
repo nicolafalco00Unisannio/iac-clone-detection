@@ -5,7 +5,7 @@ Terraform module generation and refactoring suggestions.
 from src.utils.hcl_utils import _sanitize_var_name, _hcl_value
 import re
 
-_VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-ZaLz0-9_]*)\b")
+_VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)\b")
 _INTERP_VAR_REF_RE = re.compile(r"\$\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}")
 
 def _extract_var_references(node):
