@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--output', default='clone_report.html', help='Output report filename')
     parser.add_argument('--per_project', action='store_true', help='Analyze each immediate subdirectory as a project and aggregate into one report')
     parser.add_argument('--project_limit', type=int, default=None, help='Max number of projects to analyze when using --per_project')
+    parser.add_argument('--project_timeout', type=int, default=600, help='Per-project timeout in seconds (default: 600)')
     
     args = parser.parse_args()
     
@@ -37,13 +38,31 @@ def main():
         
         all_clone_pairs = []
         all_clone_groups = []
+        skipped_projects = 0
+        skipped_timeouts = 0
+        skipped_errors = 0
         
         start_time = time.time()
 
         for i, project_dir in enumerate(project_dirs, 1):
             logging.info(f"[{i}/{total_projects}] Analyzing: {project_dir.name}...")
-            
-            clone_pairs = detect_clones_smart(str(project_dir), args.limit, args.threshold)
+            try:
+                clone_pairs = detect_clones_smart(
+                    str(project_dir),
+                    args.limit,
+                    args.threshold,
+                    timeout_seconds=args.project_timeout
+                )
+            except TimeoutError:
+                skipped_projects += 1
+                skipped_timeouts += 1
+                logging.warning(f"   -> Skipped {project_dir.name} (timeout: {args.project_timeout}s)")
+                clone_pairs = []
+            except Exception as e:
+                skipped_projects += 1
+                skipped_errors += 1
+                logging.warning(f"   -> Skipped {project_dir.name} (error: {e})")
+                clone_pairs = []
             
             if clone_pairs:
                 clone_groups = list(nx.connected_components(nx.Graph([(p1, p2) for p1, p2, _ in clone_pairs])))
@@ -56,7 +75,12 @@ def main():
             eta = (total_projects - i) * avg_time
             logging.info(f"   -> Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s")
         
-        logging.info(f"Analysis complete. Generating report for {len(all_clone_pairs)} total pairs...")
+        analyzed_projects = total_projects - skipped_projects
+        logging.info(
+            f"Analysis complete. Analyzed: {analyzed_projects}/{total_projects}, "
+            f"skipped: {skipped_projects} (timeouts: {skipped_timeouts}, errors: {skipped_errors}). "
+            f"Generating report for {len(all_clone_pairs)} total pairs..."
+        )
         generate_comprehensive_report(all_clone_pairs, all_clone_groups, args.output)
     else:
         # Detect clones for entire root
