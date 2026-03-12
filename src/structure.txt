@@ -1,0 +1,24 @@
+src/
+├── __init__.py
+├── core/
+│   ├── __init__.py
+│   ├── file_finder.py       # File discovery and filtering
+│   ├── parser.py             # AST parsing and caching
+│   └── ast_converter.py      # AST to ZSS tree conversion
+├── detectors/
+│   ├── __init__.py
+│   ├── zss_detector.py       # Bucketing + parallel detection
+│   └── detector_utils.py     # Shared utilities (signatures, node counting)
+├── analysis/
+│   ├── __init__.py
+│   ├── diff_analyzer.py      # AST comparison and diff identification
+│   └── refactoring.py        # Module generation and refactoring suggestions
+├── visualization/
+│   ├── __init__.py
+│   ├── graph_viz.py          # Graph generation (NetworkX/Pyvis)
+│   ├── diff_viz.py           # Text and HTML diff visualization
+│   └── report_generator.py   # Comprehensive HTML reports
+├── utils/
+│   ├── __init__.py
+│   └── hcl_utils.py          # HCL formatting and value conversion
+└── main.py                   # CLI entry point

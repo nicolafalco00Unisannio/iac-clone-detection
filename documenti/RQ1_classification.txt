@@ -1,0 +1,5 @@
+Possiamo proporre una mappatura 1:1 dei cloni tradizionali su IaC:
+- Tipo I, copie esatte: in IaC banalmente sarebbe la copia esatta di una risorsa, ovvero due risorse che forniscono la stessa infrastruttura con gli stessi parametri.
+- Tipo II, copie sintatticamente equivalenti (parametri rinominati): in IaC i cloni di tipo II potrebbero essere candidati per il templating (estrazione in "variable" o "module"), poiché la struttura è equivalente ma i valori cambiano.
+- Tipo III, cloni near-miss (due pezzi di codice praticamente uguali ma con variazioni minime): in IaC potrebbe essere una forma di Configuration Drift, ovvero una copia di una configurazione con una piccola variazione (es. una regola di sicurezza extra), e potrebbe portare ad ambienti inconsistenti (gli ambienti Staging e Production potrebbero differire).
+- Tipo IV, cloni semantici (fanno la stessa cosa ma differiscono sintatticamente): in IaC, due cloni di tipo IV potrebbero portare alla stessa configurazione dell'infrastruttura ma con descrizioni di risorsa diverse

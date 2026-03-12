@@ -1,0 +1,34 @@
+Abstract
+
+1 Introduzione
+
+	1.1 Obiettivi e Research Questions
+
+2 Background e lavori rilevanti
+	2. Terraform
+	2. Code smells in IaC
+	2. Code clones
+	2. Tassonomia dei cloni
+	2. Conseguenze dei cloni
+	2. Studi precedenti sui cloni in IaC (forse?)
+	2. Altri tool per clone detection
+
+3 Metodologia
+	
+	3. Architettura del tool
+	3. Conversione in AST
+	3. Tree distance con ZSS
+	3. Logica di classificazione dei cloni
+
+4 Esperimenti
+	4. TerraDS
+	4. Parametri e metriche
+	4. Hardware utilizzato
+
+5. Risultati
+
+6. Discussione
+	6. Interpretazione
+	6. Threats to validity
+
+7. Conclusione e sviluppi futuri
