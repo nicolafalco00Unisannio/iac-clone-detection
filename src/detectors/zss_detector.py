@@ -16,6 +16,10 @@ from itertools import combinations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+MIN_TREE_NODES = 100
+MAX_TREE_NODES = 500
+SIZE_DIFF_RATIO_THRESHOLD = 0.20
+
 def _terminate_pool_now(executor: concurrent.futures.ProcessPoolExecutor) -> None:
     """
     Hard-stop pool workers (needed for strict timeout behavior).
@@ -24,23 +28,62 @@ def _terminate_pool_now(executor: concurrent.futures.ProcessPoolExecutor) -> Non
     processes = getattr(executor, "_processes", None) or {}
     for proc in processes.values():
         if proc.is_alive():
-            proc.terminate()
+            # kill() is more reliable than terminate() for hard-stopping stuck workers on Windows.
+            proc.kill()
     for proc in processes.values():
         proc.join(timeout=1)
     executor.shutdown(wait=False, cancel_futures=True)
 
-def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None, timeout_seconds=None):
-    logging.debug(f"Finding files in {root_dir} with limit {limit}.")
+def detect_clones_smart(
+    root_dir,
+    limit,
+    threshold=5,
+    max_workers=None,
+    timeout_seconds=None,
+    max_tree_nodes=MAX_TREE_NODES,
+    size_diff_ratio_threshold=SIZE_DIFF_RATIO_THRESHOLD,
+    progress_callback=None,
+    checkpoint_interval_seconds=None,
+):
+    logging.debug("Finding files in %s with limit %s.", root_dir, limit)
     files = find_iac_files(root_dir, limit)
-    logging.debug(f"Found {len(files)} files. Starting parsing and bucketing...")
+    logging.debug("Found %s files. Starting parsing and bucketing...", len(files))
 
     deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
 
     def timed_out() -> bool:
         return deadline is not None and time.monotonic() >= deadline
+
+    last_progress_emit = 0.0
+    files_processed = 0
+    comparisons_completed = 0
+
+    def emit_progress(phase, total_comparisons=0, force=False):
+        nonlocal last_progress_emit
+        if progress_callback is None:
+            return
+
+        now = time.monotonic()
+        interval = checkpoint_interval_seconds or 0
+        if not force and interval > 0 and (now - last_progress_emit) < interval:
+            return
+
+        progress_callback({
+            "phase": phase,
+            "root_dir": root_dir,
+            "files_total": len(files),
+            "files_processed": files_processed,
+            "skipped_files": skipped,
+            "bucket_count": len(buckets),
+            "total_comparisons": total_comparisons,
+            "comparisons_completed": comparisons_completed,
+            "clone_pairs": list(clone_pairs),
+        })
+        last_progress_emit = now
     
     buckets = defaultdict(list)
     skipped = 0
+    clone_pairs = []
     
     # 1. Parsing & Bucketing Phase
     for path in files:
@@ -48,36 +91,46 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None, timeout_
             raise TimeoutError(f"Project analysis timed out after {timeout_seconds}s during parsing.")
 
         data = parse_file(path)
-        if data is None: 
+        files_processed += 1
+        if data is None:
+            skipped += 1
+            emit_progress("parsing")
             continue
         
         tree = to_zss_tree(data)
         size = count_nodes(tree)
         
-        # Se l'albero è troppo piccolo (es. < 100 nodi), è boilerplate.
-        if size < 100: 
-            continue 
+        # Skip boilerplate and avoid pathological ZSS costs on very large trees.
+        if size < MIN_TREE_NODES:
+            skipped += 1
+            emit_progress("parsing")
+            continue
+        if max_tree_nodes is not None and size > max_tree_nodes:
+            skipped += 1
+            emit_progress("parsing")
+            continue
 
         sig = get_ast_signature(data)
         buckets[sig].append((path, tree, size))
+        emit_progress("parsing")
         
-    logging.debug(f"Parsing complete. Skipped {skipped} files.")
-    logging.debug(f"Created {len(buckets)} distinct buckets based on structure.")
+    logging.debug("Parsing complete. Skipped %s files.", skipped)
+    logging.debug("Created %s distinct buckets based on structure.", len(buckets))
     
     active_buckets = {k: v for k, v in buckets.items() if len(v) > 1}
-    logging.debug(f"Active buckets to process: {len(active_buckets)}")
-
-    clone_pairs = []
+    logging.debug("Active buckets to process: %s", len(active_buckets))
     
-    total_comparisons = sum(len(list(combinations(v, 2))) for v in active_buckets.values())
-    logging.debug(f"Estimated comparisons required: {total_comparisons}.")
+    total_comparisons = sum((len(v) * (len(v) - 1)) // 2 for v in active_buckets.values())
+    logging.debug("Estimated comparisons required: %s.", total_comparisons)
+    emit_progress("comparison", total_comparisons=total_comparisons, force=True)
     
     def task_iter():
         for _, items in active_buckets.items():
             for (p1, t1, s1), (p2, t2, s2) in combinations(items, 2):
                 if p1 == p2:
                     continue
-                if abs(s1 - s2) > threshold:
+                max_size = max(s1, s2, 1)
+                if (abs(s1 - s2) / max_size) > size_diff_ratio_threshold:
                     continue
                 yield (p1, t1, p2, t2, threshold)
 
@@ -108,6 +161,7 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None, timeout_
             if not in_flight:
                 if tasks_exhausted:
                     break
+                time.sleep(0.01)
                 continue
 
             wait_timeout = None
@@ -125,17 +179,22 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None, timeout_
             )
 
             if not done:
+                emit_progress("comparison", total_comparisons=total_comparisons)
                 if timed_out():
                     hit_timeout = True
                 continue
 
             for fut in done:
-                try:
-                    res = fut.result()
-                    if res:
-                        clone_pairs.append(res)
-                except Exception as e:
-                    logging.warning(f"Comparison task failed: {e}")
+                comparisons_completed += 1
+                err = fut.exception()
+                if err is not None:
+                    logging.warning("Comparison task failed: %s", err)
+                    emit_progress("comparison", total_comparisons=total_comparisons)
+                    continue
+                res = fut.result()
+                if res:
+                    clone_pairs.append(res)
+                emit_progress("comparison", total_comparisons=total_comparisons)
 
         if hit_timeout:
             raise TimeoutError(f"Project analysis timed out after {timeout_seconds}s during comparison.")
@@ -146,5 +205,6 @@ def detect_clones_smart(root_dir, limit, threshold=5, max_workers=None, timeout_
         else:
             executor.shutdown(wait=True)
 
-    logging.debug(f"Detection complete. Found {len(clone_pairs)} clone pairs.")
+    logging.debug("Detection complete. Found %s clone pairs.", len(clone_pairs))
+    emit_progress("completed", total_comparisons=total_comparisons, force=True)
     return clone_pairs

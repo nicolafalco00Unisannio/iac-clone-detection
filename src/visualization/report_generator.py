@@ -85,6 +85,10 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '.diff_add { background-color: #d4edda; }',
         '.diff_chg { background-color: #fff3cd; }',
         '.diff_sub { background-color: #f8d7da; }',
+        'details.diff-details { background: #fff; border: 1px solid #dcdcdc; border-radius: 6px; margin: 0.75rem 0; overflow: hidden; }',
+        'details.diff-details summary { cursor: pointer; font-weight: 600; color: #444; padding: 0.75rem 1rem; background: #f2f4f8; }',
+        'details.diff-details summary:hover { background: #e9edf5; }',
+        '.diff-content { padding: 0.5rem 1rem 1rem 1rem; }',
         'pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.9rem; }',
         'code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 3px; font-family: "Courier New", monospace; }',
         'details.refactoring-details { background: #e7f3ff; border: 1px solid #b3d7ff; border-radius: 4px; padding: 0.5rem; margin-top: 1rem; }',
@@ -177,19 +181,24 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         
         for path1, path2 in combinations(sorted(list(group)), 2):
             try:
-                with open(path1, 'r', encoding='utf-8') as f1, open(path2, 'r', encoding='utf-8') as f2:
+                path1_obj = Path(path1)
+                path2_obj = Path(path2)
+
+                with open(path1_obj, 'r', encoding='utf-8') as f1, open(path2_obj, 'r', encoding='utf-8') as f2:
                     file1_lines = f1.readlines()
                     file2_lines = f2.readlines()
                 
                 diff_table = html_diff.make_table(
                     file1_lines,
                     file2_lines,
-                    fromdesc=str(path1.name),
-                    todesc=str(path2.name),
+                    fromdesc=str(path1_obj.name),
+                    todesc=str(path2_obj.name),
                     context=True,
                     numlines=2
                 )
-                html_parts.append(diff_table)
+                html_parts.append(
+                    f'<details class="diff-details"><summary>View diff: {path1_obj.name} ↔ {path2_obj.name}</summary><div class="diff-content">{diff_table}</div></details>'
+                )
             except Exception as e:
                 html_parts.append(f'<p> Could not generate diff: {e}</p>')
         
