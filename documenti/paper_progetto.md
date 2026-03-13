@@ -4,7 +4,7 @@
 
 ## Abstract
 
-L'Infrastructure-as-Code (IaC) è divenuta il paradigma standard per il provisioning e la gestione dell'infrastruttura cloud. Tuttavia, i flussi di lavoro basati su copy-paste introducono duplicazioni sistematiche che causano configuration drift, propagazione di vulnerabilità di sicurezza e bloat di risorse. I tradizionali strumenti di clone detection, progettati per linguaggi di programmazione general-purpose, risultano inadeguati per i linguaggi dichiarativi come HCL2 (HashiCorp Configuration Language), dove i confronti testuali falliscono nel catturare l'equivalenza strutturale. In questo lavoro proponiamo un tool di clone detection specifico per Terraform che combina il parsing di AST (Abstract Syntax Tree) con l'algoritmo di Tree Edit Distance di Zhang-Shasha per identificare e classificare automaticamente cloni di Tipo 1, 2 e 3. Il nostro approccio introduce un meccanismo di bucketing basato sulla signature delle risorse per ridurre lo spazio di confronto, una codifica value-aware dei nodi foglia per distinguere differenze parametriche da differenze strutturali, e un sistema di suggerimenti di refactoring che genera codice Terraform concreto (estrazione in moduli o parametrizzazione tramite tfvars). Valutiamo il tool sul dataset TerraDS, analizzando la distribuzione dei tipi di clone, il loro impatto sulla manutenibilità e la prevalenza relativa di ciascuna tipologia.
+L'Infrastructure-as-Code (IaC) è divenuta il paradigma standard per il provisioning e la gestione dell'infrastruttura cloud. Tuttavia, i flussi di lavoro basati su copy-paste introducono duplicazioni sistematiche che causano configuration drift, propagazione di vulnerabilità di sicurezza e bloat di risorse. I tradizionali strumenti di clone detection, progettati per linguaggi di programmazione general-purpose, risultano inadeguati per i linguaggi dichiarativi come HCL2 (HashiCorp Configuration Language), dove i confronti testuali falliscono nel catturare l'equivalenza strutturale. In questo lavoro proponiamo un tool di clone detection specifico per Terraform che combina il parsing di AST (Abstract Syntax Tree) con l'algoritmo di Tree Edit Distance di Zhang-Shasha per identificare e classificare automaticamente cloni di Tipo 1, 2 e 3. Il nostro approccio introduce un meccanismo di bucketing basato sulla signature delle risorse per ridurre lo spazio di confronto, una codifica value-aware dei nodi foglia per distinguere differenze parametriche da differenze strutturali, e un sistema di suggerimenti di refactoring che genera codice Terraform concreto (estrazione in moduli o parametrizzazione tramite tfvars). Per garantire la scalabilità su dataset di grandi dimensioni, il tool implementa un sistema di timeout per-progetto con terminazione forzata dei worker, un meccanismo di checkpointing persistente che consente di interrompere e riprendere l'analisi senza perdere i risultati parziali, e un limite di profondità nella conversione AST per prevenire esplosioni combinatorie su alberi patologici. Valutiamo il tool sul dataset TerraDS, analizzando la distribuzione dei tipi di clone, il loro impatto sulla manutenibilità e la prevalenza relativa di ciascuna tipologia.
 
 ---
 
@@ -25,11 +25,12 @@ In questo lavoro proponiamo un approccio strutturale al clone detection per Terr
 3. **Bucketing per signature** delle risorse, che riduce drasticamente lo spazio di confronto da O(n²) a O(k²) dove k << n.
 4. **Classificazione automatica** dei cloni in Tipo 1 (esatti), Tipo 2 (parametrizzati) e Tipo 3 (near-miss) basata sul rapporto tra TED e differenze parametriche.
 5. **Suggerimenti di refactoring** che generano codice Terraform concreto per l'estrazione in moduli o la parametrizzazione tramite variabili.
+6. **Timeout per-progetto e checkpointing** che garantiscono la robustezza dell'analisi su dataset di grandi dimensioni, con possibilità di ripresa da interruzioni.
 
 I contributi principali di questo lavoro sono:
 
 - La definizione di una mappatura tra la tassonomia classica dei code clone [Roy & Cordy, 2009] e il contesto specifico dell'Infrastructure-as-Code.
-- La progettazione e implementazione di un tool di clone detection AST-based specifico per Terraform, con ottimizzazioni per la scalabilità (bucketing, parallelizzazione, pruning).
+- La progettazione e implementazione di un tool di clone detection AST-based specifico per Terraform, con ottimizzazioni per la scalabilità (bucketing, parallelizzazione, pruning) e meccanismi di robustezza (timeout per-progetto, checkpointing persistente, limite di profondità AST).
 - Una valutazione empirica sul dataset TerraDS che analizza distribuzione, impatto e prevalenza dei cloni nel codice Terraform.
 - Un sistema di suggerimenti di refactoring automatici che genera codice Terraform eseguibile.
 
@@ -155,29 +156,38 @@ Il nostro tool implementa una pipeline di clone detection composta da sette fasi
 │  File        │    │  Parsing     │    │  AST         │    │  Bucketing   │
 │  Discovery   │───▶│  HCL2        │───▶│  Conversion  │───▶│  per         │
 │  (.tf)       │    │  → dict      │    │  dict → ZSS  │    │  Signature   │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────┬───────┘
-                                                                   │
+└──────────────┘    └──────────────┘    │  (depth≤30)  │    └──────┬───────┘
+                                        └──────────────┘           │
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
 │  HTML Report │    │  Classifica- │    │  TED         │◀─────────┘
 │  Generation  │◀───│  zione Cloni │◀───│  Computation │
-│  + Refactor  │    │  Type 1/2/3  │    │  (parallela) │
-└──────────────┘    └──────────────┘    └──────────────┘
+│  + Refactor  │    │  Type 1/2/3  │    │  (parallela  │
+└──────────────┘    └──────────────┘    │  + timeout)  │
+        ▲                               └──────────────┘
+        │
+┌──────────────┐
+│  Checkpoint  │
+│  (JSON)      │
+│  + Resume    │
+└──────────────┘
 ```
-*Figura 1: Pipeline di clone detection.*
+*Figura 1: Pipeline di clone detection con checkpointing e timeout.*
 
 **Fase 1 — File Discovery.** Il modulo `file_finder.py` esegue una scansione ricorsiva della directory di input, selezionando esclusivamente file con estensione `.tf`. Vengono esclusi: (a) i file nella directory `.terraform/` (moduli vendor scaricati automaticamente); (b) i file di sola configurazione che non contengono logica refactorabile (`variables.tf`, `outputs.tf`, `versions.tf`, `provider.tf`, `backend.tf`, `context.tf`, `terraform.tfvars`); (c) i file che non contengono almeno un blocco `resource` o `module`, verificato tramite espressione regolare `^\s*(resource|module)\s+"`.
 
 **Fase 2 — Parsing.** Il modulo `parser.py` utilizza la libreria `python-hcl2` per parsare ciascun file `.tf` in un dizionario Python che rappresenta l'AST del file. Il parser gestisce gracefully gli errori, restituendo `None` per file malformati senza interrompere l'analisi.
 
-**Fase 3 — Conversione AST.** Il modulo `ast_converter.py` converte il dizionario Python in un albero compatibile con la libreria ZSS (Zhang-Shasha).
+**Fase 3 — Conversione AST.** Il modulo `ast_converter.py` converte il dizionario Python in un albero compatibile con la libreria ZSS (Zhang-Shasha). La conversione implementa un limite di profondità massima (`MAX_ZSS_DEPTH = 30`): i nodi oltre questa soglia vengono troncati con un'etichetta `DEPTH_LIMIT`, prevenendo esplosioni combinatorie su alberi patologicamente profondi e garantendo tempi di calcolo TED predicibili.
 
 **Fase 4 — Bucketing.** Il modulo `detector_utils.py` calcola una signature per ciascun file basata sui tipi di risorsa contenuti. I file con signature identica vengono raggruppati nello stesso bucket; solo le coppie all'interno dello stesso bucket vengono confrontate.
 
-**Fase 5 — TED Computation.** Il modulo `zss_detector.py` orchestra il calcolo parallelo della Tree Edit Distance per tutte le coppie di file all'interno di ciascun bucket, utilizzando `ProcessPoolExecutor`.
+**Fase 5 — TED Computation.** Il modulo `zss_detector.py` orchestra il calcolo parallelo della Tree Edit Distance per tutte le coppie di file all'interno di ciascun bucket, utilizzando `ProcessPoolExecutor` con gestione manuale dei future. Il modulo implementa: (a) un timeout per-progetto configurabile che interrompe l'analisi dopo un tempo limite, con terminazione forzata (`kill`) dei worker per garantire il rilascio delle risorse anche su Windows; (b) un filtro superiore sulla dimensione degli alberi (`MAX_TREE_NODES = 500`) che esclude file troppo grandi il cui costo TED sarebbe proibitivo; (c) un pruning basato sul rapporto di differenza di dimensione (`SIZE_DIFF_RATIO_THRESHOLD = 0.20`) anziché sulla differenza assoluta, per adattare il filtraggio alla scala degli alberi; (d) un sistema di progress callback che emette lo stato dell'analisi a intervalli configurabili.
 
 **Fase 6 — Classificazione.** Il modulo `diff_analyzer.py` classifica ciascuna coppia di cloni in Type 1, 2 o 3 basandosi sul rapporto tra la TED e il numero di differenze parametriche.
 
-**Fase 7 — Report.** Il modulo `report_generator.py` genera un report HTML interattivo con statistiche aggregate, diff side-by-side e suggerimenti di refactoring.
+**Fase 7 — Report.** Il modulo `report_generator.py` genera un report HTML interattivo con statistiche aggregate, diff side-by-side racchiuse in sezioni collassabili (`<details>`) per migliorare la navigabilità, e suggerimenti di refactoring.
+
+**Checkpointing e ripresa.** Il modulo `main.py` implementa un sistema di checkpointing persistente che salva periodicamente lo stato dell'analisi (progetti completati, coppie di cloni trovate, contatori di errori e timeout) su file JSON. Il salvataggio avviene tramite scrittura atomica (write su file temporaneo + `os.replace`) con retry e fallback su file di recovery in caso di lock. In caso di interruzione (`KeyboardInterrupt` o timeout), il tool genera un report parziale e un checkpoint che consente di riprendere l'analisi con il flag `--resume_checkpoint`, evitando di riprocessare i progetti già completati.
 
 ### 3.2 Conversione in AST
 
@@ -201,11 +211,12 @@ La libreria `python-hcl2` parsa il file `.tf` producendo un dizionario con la se
 }
 ```
 
-La funzione `to_zss_tree(node, label)` converte ricorsivamente questo dizionario in un albero ZSS secondo le seguenti regole:
+La funzione `to_zss_tree(node, label, max_depth, _depth)` converte ricorsivamente questo dizionario in un albero ZSS secondo le seguenti regole:
 
 1. **Dizionari:** Ogni chiave diventa un nodo figlio; il valore viene convertito ricorsivamente come sottoalbero del nodo chiave.
 2. **Liste:** Ciascun elemento della lista diventa un nodo figlio con etichetta `"{label}_item"`.
 3. **Valori foglia** (stringhe, numeri, booleani): Vengono codificati come nodi con etichetta `VAL:{valore}`.
+4. **Limite di profondità:** Se la ricorsione raggiunge `MAX_ZSS_DEPTH` (default: 30), il nodo viene troncato con etichetta `{label}:DEPTH_LIMIT`. Questo previene alberi patologicamente profondi — ad esempio configurazioni con policy JSON annidate — dal generare costi TED esponenziali.
 
 La codifica dei valori foglia con il prefisso `VAL:` è una scelta progettuale cruciale. Senza questo prefisso, due alberi con struttura identica ma valori diversi avrebbero TED = 0, rendendo impossibile distinguere cloni di Tipo 1 (identici) da cloni di Tipo 2 (parametrizzati). Con il prefisso, un'operazione di sostituzione di un valore foglia ha costo 1 nel calcolo della TED.
 
@@ -244,13 +255,26 @@ Per mitigare il costo computazionale, il nostro tool implementa tre strategie di
 
 **Bucketing per signature.** La funzione `get_ast_signature(data)` genera una stringa di signature per ciascun file, concatenando i tipi di risorsa presenti (es. `res:aws_instance|res:aws_s3_bucket`) ordinati alfabeticamente. Solo i file con signature identica vengono confrontati, riducendo il numero di confronti da $\binom{n}{2}$ (tutte le coppie) a $\sum_b \binom{k_b}{2}$ dove $k_b$ è il numero di file nel bucket $b$ e $k_b \ll n$.
 
-**Pruning per dimensione.** Prima di calcolare la TED, il tool verifica che la differenza di dimensione tra i due alberi non superi la soglia: se $|n_1 - n_2| > \text{threshold}$, la coppia viene scartata senza calcolare la TED, poiché la distanza non potrà mai essere inferiore alla differenza di dimensione.
+**Pruning per rapporto di dimensione.** Prima di calcolare la TED, il tool verifica che il rapporto di differenza di dimensione tra i due alberi non superi una soglia relativa: se $\frac{|n_1 - n_2|}{\max(n_1, n_2)} > 0.20$, la coppia viene scartata senza calcolare la TED. L'uso di una soglia relativa (anziché assoluta come nella versione iniziale) consente un filtraggio più accurato: per alberi piccoli, una differenza di pochi nodi è significativa, mentre per alberi grandi la stessa differenza assoluta potrebbe non esserlo.
 
-**Parallelizzazione.** Il calcolo della TED per le coppie all'interno di ciascun bucket viene distribuito su più processi tramite `ProcessPoolExecutor` con `chunksize=50`, sfruttando la natura *embarassingly parallel* del problema.
+**Parallelizzazione con gestione dei future.** Il calcolo della TED per le coppie all'interno di ciascun bucket viene distribuito su più processi tramite `ProcessPoolExecutor`. Anziché utilizzare `executor.map` con chunksize fisso, il tool gestisce manualmente i future con un pool di dimensione `max_in_flight = workers × 4`, raccogliendo i risultati incrementalmente tramite `concurrent.futures.wait` con `return_when=FIRST_COMPLETED`. Questo approccio consente: (a) il rispetto del timeout tramite controllo periodico della deadline; (b) l'emissione di progress callback durante l'attesa; (c) la terminazione immediata dei worker in caso di timeout tramite `proc.kill()` sui processi del pool.
 
-**Filtraggio file boilerplate.** I file con meno di 100 nodi nell'albero ZSS vengono esclusi dall'analisi. Questa soglia è motivata dal fatto che file molto piccoli (es. definizioni di poche variabili o configurazioni minimali) genererebbero un elevato numero di falsi positivi senza valore informativo per il refactoring.
+**Filtraggio file boilerplate e file troppo grandi.** I file con meno di `MIN_TREE_NODES = 100` nodi nell'albero ZSS vengono esclusi dall'analisi, in quanto file molto piccoli genererebbero un elevato numero di falsi positivi senza valore informativo per il refactoring. Simmetricamente, i file con più di `MAX_TREE_NODES = 500` nodi vengono esclusi per evitare costi TED proibitivi: l'algoritmo Zhang-Shasha ha complessità superquadratica, e alberi molto grandi (es. file con centinaia di risorse) renderebbero l'analisi intrattabile.
+
+**Timeout per-progetto.** Il detector accetta un parametro `timeout_seconds` che impone un limite temporale all'analisi di ciascun progetto. Il timeout viene verificato durante la fase di parsing (prima di ogni file) e durante la fase di confronto (prima di sottomettere nuovi task e dopo ogni attesa). In caso di timeout, viene sollevata un'eccezione `TimeoutError` e i worker del pool vengono terminati forzatamente tramite `proc.kill()`, necessario per garantire il rilascio delle risorse anche su Windows dove `terminate()` potrebbe non essere sufficiente per worker bloccati in calcoli CPU-bound.
 
 La soglia di TED è configurabile dall'utente (valore di default: 5). Una coppia di file viene classificata come clone solo se la sua TED è inferiore o uguale alla soglia. Valori più bassi producono risultati più conservativi (solo cloni molto simili), mentre valori più alti includono anche cloni near-miss con maggiori differenze strutturali.
+
+**Parametri CLI per robustezza.** L'analisi per-progetto (`--per_project`) supporta i seguenti parametri aggiuntivi:
+
+| Flag CLI | Default | Funzione |
+|----------|---------|----------|
+| `--project_timeout` | 600s | Timeout per l'analisi di ciascun progetto |
+| `--checkpoint_file` | `clone_checkpoint.json` | File di salvataggio dello stato |
+| `--resume_checkpoint` | off | Riprende l'analisi da un checkpoint esistente |
+| `--checkpoint_interval` | 300s | Intervallo di salvataggio intra-progetto |
+
+In caso di interruzione (timeout o `Ctrl+C`), il tool: (1) salva un checkpoint con lo stato corrente; (2) genera un report parziale (suffisso `_partial`) con i risultati disponibili; (3) stampa il comando per riprendere l'analisi. I progetti vengono processati in ordine alfabetico deterministico per garantire la riproducibilità del checkpoint.
 
 ### 3.4 Logica di Classificazione dei Cloni
 
@@ -337,10 +361,14 @@ La configurazione sperimentale utilizza i seguenti parametri:
 | Parametro | Valore | Motivazione |
 |-----------|--------|-------------|
 | **Soglia TED** | 5 | Compromesso tra recall e precision; cattura cloni con fino a 5 operazioni di editing |
-| **Nodi minimi** | 100 | Esclude file boilerplate che genererebbero falsi positivi |
+| **Nodi minimi** (`MIN_TREE_NODES`) | 100 | Esclude file boilerplate che genererebbero falsi positivi |
+| **Nodi massimi** (`MAX_TREE_NODES`) | 500 | Esclude file troppo grandi con costo TED proibitivo |
+| **Profondità massima AST** (`MAX_ZSS_DEPTH`) | 30 | Previene esplosioni combinatorie su alberi patologicamente profondi |
+| **Soglia rapporto dimensione** (`SIZE_DIFF_RATIO_THRESHOLD`) | 0.20 | Pruning relativo: scarta coppie con differenza di dimensione > 20% |
 | **Bucketing** | Per tipo di risorsa | Evita confronti tra file con risorse diverse |
-| **Parallelizzazione** | ProcessPoolExecutor | Sfrutta tutti i core disponibili |
-| **Chunksize** | 50 | Compromesso tra overhead di scheduling e bilanciamento del carico |
+| **Parallelizzazione** | ProcessPoolExecutor con gestione manuale dei future | Sfrutta tutti i core disponibili con supporto timeout |
+| **Timeout per-progetto** (`--project_timeout`) | 600s | Impedisce che progetti patologici blocchino l'intera analisi |
+| **Intervallo checkpoint** (`--checkpoint_interval`) | 300s | Frequenza di salvataggio dello stato durante l'analisi di un progetto |
 
 Le regole di filtraggio dei file escludono i seguenti nomi: `variables.tf`, `outputs.tf`, `versions.tf`, `provider.tf`, `backend.tf`, `context.tf`, `terraform.tfvars`. Inoltre, viene verificata la presenza di almeno un blocco `resource` o `module` tramite l'espressione regolare `^\s*(resource|module)\s+"`.
 
@@ -457,7 +485,8 @@ Yu et al. [2025] hanno dimostrato che non tutti i cloni sono negativi; alcuni ra
 #### Internal Validity
 
 - **Bias di granularità file-level.** La scelta di operare a livello di file intero (anziché di sottoblocco) introduce un bias: file grandi con una porzione clonata e una porzione diversa risulteranno con TED elevata e non verranno rilevati come cloni parziali. Questo bias è mitigato dal fatto che in Terraform i file tendono ad essere focalizzati su singole risorse o gruppi di risorse correlate.
-- **Complessità algoritmica.** La complessità dell'algoritmo Zhang-Shasha, pur ottimizzata dal bucketing e dal pruning, rimane elevata per file molto grandi. Il filtraggio dei file con meno di 100 nodi esclude potenzialmente cloni significativi in file di piccole dimensioni.
+- **Complessità algoritmica e limiti di filtraggio.** La complessità dell'algoritmo Zhang-Shasha, pur ottimizzata dal bucketing e dal pruning, rimane elevata per file molto grandi. Il filtraggio dei file con meno di 100 nodi esclude potenzialmente cloni significativi in file di piccole dimensioni. Simmetricamente, il limite superiore di 500 nodi (`MAX_TREE_NODES`) esclude file di grandi dimensioni che potrebbero contenere cloni rilevanti; tuttavia, questa scelta è necessaria per garantire tempi di analisi ragionevoli. Il limite di profondità AST (`MAX_ZSS_DEPTH = 30`) tronca alberi molto profondi, potenzialmente perdendo informazione strutturale in configurazioni con annidamento estremo.
+- **Timeout e completezza.** Il meccanismo di timeout per-progetto può interrompere l'analisi di progetti complessi prima del completamento, escludendo potenziali clone pair. Il sistema di checkpointing mitiga questo rischio consentendo di riprendere l'analisi con timeout più generosi.
 
 #### External Validity
 
@@ -473,10 +502,11 @@ In questo lavoro abbiamo proposto un tool di clone detection specifico per Infra
 I principali contributi del lavoro sono:
 
 1. Una **mappatura della tassonomia classica dei code clone** (Type 1-4) al contesto specifico dell'Infrastructure-as-Code, con definizioni operative per ciascun tipo.
-2. Un **tool di clone detection AST-based** per Terraform che utilizza l'algoritmo Zhang-Shasha per la Tree Edit Distance, con ottimizzazioni per la scalabilità (bucketing per signature, pruning per dimensione, parallelizzazione).
+2. Un **tool di clone detection AST-based** per Terraform che utilizza l'algoritmo Zhang-Shasha per la Tree Edit Distance, con ottimizzazioni per la scalabilità (bucketing per signature, pruning per rapporto di dimensione, parallelizzazione con gestione dei future) e meccanismi di robustezza (timeout per-progetto con terminazione forzata dei worker, limite di profondità AST, limite superiore sulla dimensione degli alberi).
 3. Un **sistema di classificazione automatica** basato sul rapporto tra TED e differenze parametriche, che distingue cloni esatti (Type 1), parametrizzati (Type 2) e near-miss (Type 3).
 4. Un **generatore di suggerimenti di refactoring** che produce codice Terraform eseguibile, con strategie differenziate per parametrizzazione tramite tfvars e estrazione in moduli.
-5. Una **test suite automatizzata** di 69 test che verifica la correttezza di ogni fase della pipeline, dalla conversione AST alla generazione dei suggerimenti di refactoring.
+5. Un **sistema di checkpointing persistente** che salva lo stato dell'analisi su file JSON con scrittura atomica, consentendo di interrompere e riprendere l'analisi senza perdere i risultati parziali, e di generare report anche in caso di interruzione.
+6. Una **test suite automatizzata** di 69 test che verifica la correttezza di ogni fase della pipeline, dalla conversione AST alla generazione dei suggerimenti di refactoring.
 
 Come sviluppi futuri, identifichiamo cinque direzioni di ricerca:
 
@@ -493,7 +523,7 @@ Come sviluppi futuri, identifichiamo cinque direzioni di ricerca:
 | Sviluppo Futuro | Categoria | Difficoltà | Problema Affrontato |
 |-----------------|-----------|------------|---------------------|
 | Variable Resolution | Analisi semantica | Alta | Falsi negativi da riferimenti non risolti |
-| Vector Hashing | Prestazioni | Media | Scalabilità su dataset grandi |
+| Vector Hashing / LSH | Prestazioni | Media | Scalabilità su dataset grandi |
 | Subtree Mining | Granularità | Alta | Bias file-level |
 | ML Recommendations | Automazione | Alta | Prioritizzazione dei cloni |
 | Multi-Language Support | Estensibilità | Media | Limitazione a Terraform |
