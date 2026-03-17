@@ -345,14 +345,11 @@ La Tabella seguente riassume le statistiche del dataset dopo il filtraggio:
 
 | Metrica | Valore |
 |---------|--------|
-| File `.tf` processati | 1,000 |
-| Bucket creati (signature distinte) | 418 |
-| Bucket attivi (≥ 2 file) | 90 |
-| Confronti effettuati | 596 |
-| Confronti teorici (N² naive) | ~499,500 |
-| **Riduzione confronti** | **99.88%** |
+| File coinvolti nell'analisi | 5,874 |
+| Clone pair rilevate | 8,048 |
+| Clone group | 2,287 |
 
-Il meccanismo di bucketing per signature riduce il numero di confronti di circa tre ordini di grandezza rispetto all'approccio naive a coppie, rendendo l'analisi trattabile anche su dataset di grandi dimensioni.
+Il meccanismo di bucketing per signature riduce il numero di confronti rispetto all'approccio naive a coppie, rendendo l'analisi trattabile anche su dataset di grandi dimensioni.
 
 ### 4.2 Parametri e Metriche
 
@@ -402,7 +399,7 @@ In questa sezione presentiamo i risultati dell'analisi empirica, organizzati per
 
 La mappatura proposta tra tassonomia classica dei clone e contesto IaC (Sezione 2.4) si è dimostrata operazionalmente valida. La classificazione basata sul rapporto tra TED e differenze parametriche consente di distinguere efficacemente le tre tipologie.
 
-Sull'intero dataset TerraDS (1,000 file, soglia TED = 5), il tool ha rilevato **356 clone pair** organizzati in **38 clone group**.
+Sull'intero dataset TerraDS (soglia TED = 5), il tool ha rilevato **8,048 clone pair** organizzati in **2,287 clone group**, coinvolgendo **5,874 file**.
 
 La regola di classificazione $d = p$ (TED uguale al numero di differenze parametriche) si è dimostrata un criterio operativo affidabile per distinguere cloni di Tipo 2 da cloni di Tipo 3. Consideriamo un esempio concreto dal dataset: due file di configurazione di un cluster Kubernetes (`k8s_cluster.tf`) in due ambienti diversi presentano struttura identica ma differiscono per il parametro `network_plugin` (`"calico"` vs `"kubenet"`) e per il nome del cluster. Il tool calcola TED = 2 e rileva esattamente 2 differenze parametriche, classificando correttamente la coppia come **Type 2 (Parameterized Clone)** e suggerendo l'estrazione in un modulo con due variabili.
 
@@ -414,7 +411,7 @@ In sintesi:
 
 ### RQ2: What is the impact of code clones in IaC?
 
-L'analisi delle 356 coppie di cloni rilevate, combinata con la letteratura esistente, conferma i quattro impatti identificati in Sezione 2.5. Di seguito riportiamo evidenze qualitative dal dataset.
+L'analisi delle 8,048 coppie di cloni rilevate, combinata con la letteratura esistente, conferma i quattro impatti identificati in Sezione 2.5. Di seguito riportiamo evidenze qualitative dal dataset.
 
 **Configuration drift.** I cloni di Tipo 3 rilevati mostrano pattern consistenti di divergenza tra ambienti. Ad esempio, nel dataset sono presenti coppie di file VPC (`vpc.tf`) che condividono la stessa struttura di rete ma differiscono per la presenza/assenza di blocchi di configurazione come `enable_dns_hostnames` o regole di routing aggiuntive. Queste differenze strutturali sono indicative di modifiche applicate a un ambiente ma non propagate all'altro — il classico pattern di configuration drift.
 
@@ -430,31 +427,27 @@ La distribuzione dei tipi di clone rilevati sul dataset TerraDS è la seguente:
 
 | Tipo di Clone | Coppie | Percentuale |
 |--------------|--------|-------------|
-| Type 1 (Exact Clone) | 208 | 58.4% |
-| Type 2 (Parameterized Clone) | 93 | 26.1% |
-| Type 3 (Near-miss Clone) | 55 | 15.5% |
-| **Totale** | **356** | **100%** |
+| Type 1 (Exact Clone) | 5,143 | 63.9% |
+| Type 2 (Parameterized Clone) | 1,329 | 16.5% |
+| Type 3 (Near-miss Clone) | 1,576 | 19.6% |
+| **Totale** | **8,048** | **100%** |
 
-**I cloni di Tipo 1 sono dominanti**, rappresentando il 58.4% delle coppie rilevate. Questo risultato indica che la pratica prevalente nel codice Terraform è la copia esatta di file tra ambienti o progetti, senza alcuna modifica. I 38 clone group rilevati confermano che i cloni non sono distribuiti uniformemente ma si concentrano in cluster di file identici o quasi identici — spesso corrispondenti a copie dello stesso modulo in diversi ambienti (dev, staging, prod).
+**I cloni di Tipo 1 sono dominanti**, rappresentando il 63.9% delle coppie rilevate. Questo risultato indica che la pratica prevalente nel codice Terraform è la copia esatta di file tra ambienti o progetti, senza alcuna modifica. I 2,287 clone group rilevati confermano che i cloni non sono distribuiti uniformemente ma si concentrano in cluster di file identici o quasi identici — spesso corrispondenti a copie dello stesso modulo in diversi ambienti (dev, staging, prod).
 
-I cloni di Tipo 2 (26.1%) rappresentano il segmento più promettente per il refactoring automatizzato: file con struttura isomorfa e poche differenze parametriche possono essere consolidati tramite moduli Terraform o parametrizzazione con variabili, riducendo significativamente la duplicazione.
+I cloni di Tipo 2 (16.5%) rappresentano il segmento più promettente per il refactoring automatizzato: file con struttura isomorfa e poche differenze parametriche possono essere consolidati tramite moduli Terraform o parametrizzazione con variabili, riducendo significativamente la duplicazione.
 
-I cloni di Tipo 3 (15.5%) sono i meno frequenti ma i più insidiosi, poiché indicano divergenza strutturale tra file originariamente identici — il segnale più forte di configuration drift attivo.
+I cloni di Tipo 3 (19.6%) indicano divergenza strutturale tra file originariamente identici — il segnale più forte di configuration drift attivo.
 
 ### Riepilogo dei Risultati
 
 | Metrica | Valore |
 |---------|--------|
-| File analizzati | 1,000 |
-| Bucket creati | 418 |
-| Bucket attivi (≥ 2 file) | 90 |
-| Confronti effettuati | 596 |
-| Clone pair rilevate | 356 |
-| Clone group | 38 |
-| Cloni Type 1 | 208 (58.4%) |
-| Cloni Type 2 | 93 (26.1%) |
-| Cloni Type 3 | 55 (15.5%) |
-| Riduzione confronti (vs N²) | 99.88% |
+| File coinvolti | 5,874 |
+| Clone pair rilevate | 8,048 |
+| Clone group | 2,287 |
+| Cloni Type 1 | 5,143 (63.9%) |
+| Cloni Type 2 | 1,329 (16.5%) |
+| Cloni Type 3 | 1,576 (19.6%) |
 
 ---
 
@@ -462,7 +455,7 @@ I cloni di Tipo 3 (15.5%) sono i meno frequenti ma i più insidiosi, poiché ind
 
 ### 6.1 Interpretazione dei Risultati
 
-I risultati ottenuti si allineano con la letteratura esistente sul clone detection. La presenza di cloni nel codice Terraform conferma le osservazioni di McIntosh et al. [2011] sui file di build (circa 50% di logica duplicata) e di Bessghaier et al. [2024] sui file Puppet (74% di file con smell). La predominanza di cloni esatti (Tipo 1, 58.4%) differisce dai risultati di Mondal et al. [2017] nel contesto general-purpose, dove i cloni near-miss sono più comuni. Questa differenza è spiegabile con la natura dichiarativa dell'IaC: gli ingegneri Terraform copiano interi file tra ambienti (dev → prod) senza modifiche, generando copie esatte, mentre nel codice imperativo le copie tendono a subire adattamenti immediati. I cloni di Tipo 2 (26.1%) e Tipo 3 (15.5%) confermano tuttavia che anche nel contesto IaC si osserva la progressiva divergenza delle copie nel tempo.
+I risultati ottenuti si allineano con la letteratura esistente sul clone detection. La presenza di cloni nel codice Terraform conferma le osservazioni di McIntosh et al. [2011] sui file di build (circa 50% di logica duplicata) e di Bessghaier et al. [2024] sui file Puppet (74% di file con smell). La predominanza di cloni esatti (Tipo 1, 63.9%) differisce dai risultati di Mondal et al. [2017] nel contesto general-purpose, dove i cloni near-miss sono più comuni. Questa differenza è spiegabile con la natura dichiarativa dell'IaC: gli ingegneri Terraform copiano interi file tra ambienti (dev → prod) senza modifiche, generando copie esatte, mentre nel codice imperativo le copie tendono a subire adattamenti immediati. I cloni di Tipo 2 (16.5%) e Tipo 3 (19.6%) confermano tuttavia che anche nel contesto IaC si osserva la progressiva divergenza delle copie nel tempo.
 
 La scelta dell'approccio tree-based si è rivelata appropriata. Coerentemente con i risultati di Bellon et al. [2007], l'analisi strutturale tramite AST eccelle nel rilevamento di cloni di Tipo 2 e 3, dove gli approcci testuali e token-based mostrano limiti. In particolare, la capacità di rilevare file con blocchi identici ma in ordine diverso — un pattern frequente in Terraform dove l'ordine delle risorse è irrilevante — rappresenta un vantaggio concreto rispetto ai diff testuali.
 
