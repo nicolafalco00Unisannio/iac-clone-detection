@@ -3,3 +3,6 @@ __pycache__
 *.html
 *.json
 *.json.tmp
+terraformTests
+pre.txt
+post.txt
