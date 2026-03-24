@@ -436,6 +436,10 @@ La distribuzione dei tipi di clone rilevati sul dataset TerraDS è la seguente:
 | Type 2 (Parameterized Clone) | 1,329 | 16.5% |
 | Type 3 (Near-miss Clone) | 1,576 | 19.6% |
 | **Totale** | **8,048** | **100%** |
+| Type 1 (Exact Clone) | 5,143 | 63.9% |
+| Type 2 (Parameterized Clone) | 1,329 | 16.5% |
+| Type 3 (Near-miss Clone) | 1,576 | 19.6% |
+| **Totale** | **8,048** | **100%** |
 
 **I cloni di Tipo 1 sono dominanti**, rappresentando il 63.9% delle coppie rilevate. Questo risultato indica che la pratica prevalente nel codice Terraform resta la copia esatta di file o blocchi infrastrutturali tra ambienti/progetti. I **2,287 clone group** confermano che i cloni non sono distribuiti uniformemente ma si concentrano in cluster di riuso ripetuto.
 
