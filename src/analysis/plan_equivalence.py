@@ -40,6 +40,15 @@ def _normalize_address_for_module_refactor(address: str) -> str:
     return address
 
 
+def _normalize_label_separators(value: str) -> str:
+    """Normalize Terraform label separator style (dash vs underscore).
+
+    This is useful when refactoring renamed internal labels from `foo-bar` to
+    `foo_bar` while keeping the same effective infrastructure behavior.
+    """
+    return value.replace("-", "_")
+
+
 def _normalize_value(value: Any) -> Any:
     """Recursively normalize values for deterministic comparisons."""
     if isinstance(value, dict):
@@ -70,6 +79,7 @@ def _semantic_view(
     include_output_changes: bool = True,
     strict: bool = False,
     normalize_modules: bool = False,
+    normalize_label_separators: bool = False,
 ) -> dict[str, Any]:
     """Extract a semantic view of a Terraform plan for equivalence checks.
     
@@ -90,13 +100,19 @@ def _semantic_view(
         address = item.get("address")
         if normalize_modules:
             address = _normalize_address_for_module_refactor(address)
+        if normalize_label_separators and isinstance(address, str):
+            address = _normalize_label_separators(address)
+
+        name = item.get("name")
+        if normalize_label_separators and isinstance(name, str):
+            name = _normalize_label_separators(name)
         
         resource_changes.append(
             {
                 "address": address,
                 "mode": item.get("mode"),
                 "type": item.get("type"),
-                "name": item.get("name"),
+                "name": name,
                 "index": _normalize_value(item.get("index")),
                 "change": _normalize_change(item.get("change", {}), strict=strict),
             }
@@ -396,6 +412,7 @@ def compare_plan_dicts(
     include_output_changes: bool = True,
     strict: bool = False,
     normalize_modules: bool = False,
+    normalize_label_separators: bool = False,
 ) -> PlanComparisonResult:
     """Compare two Terraform plans represented as Python dicts.
     
@@ -412,12 +429,14 @@ def compare_plan_dicts(
         include_output_changes=include_output_changes,
         strict=strict,
         normalize_modules=normalize_modules,
+        normalize_label_separators=normalize_label_separators,
     )
     candidate_summary = _semantic_view(
         candidate_plan,
         include_output_changes=include_output_changes,
         strict=strict,
         normalize_modules=normalize_modules,
+        normalize_label_separators=normalize_label_separators,
     )
 
     return PlanComparisonResult(
@@ -434,6 +453,7 @@ def compare_plan_files(
     include_output_changes: bool = True,
     strict: bool = False,
     normalize_modules: bool = False,
+    normalize_label_separators: bool = False,
 ) -> PlanComparisonResult:
     """Load plan files (JSON or TXT format) and compare them semantically.
     
@@ -452,6 +472,7 @@ def compare_plan_files(
         include_output_changes=include_output_changes,
         strict=strict,
         normalize_modules=normalize_modules,
+        normalize_label_separators=normalize_label_separators,
     )
 
 
@@ -479,6 +500,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore module wrapping differences (treats 'module.X.resource.name' as equivalent to 'resource.name')",
     )
+    parser.add_argument(
+        "--normalize-label-separators",
+        action="store_true",
+        help="Treat Terraform label style differences as equivalent (e.g. 'name-with-dash' == 'name_with_dash')",
+    )
     return parser
 
 
@@ -492,6 +518,7 @@ def main() -> int:
         include_output_changes=not args.ignore_output_changes,
         strict=args.strict,
         normalize_modules=args.normalize_modules,
+        normalize_label_separators=args.normalize_label_separators,
     )
 
     if result.equivalent:
