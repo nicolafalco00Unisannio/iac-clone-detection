@@ -8,6 +8,43 @@ import re
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)\b")
 _INTERP_VAR_REF_RE = re.compile(r"\$\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}")
 
+_MODULE_SOURCE_PATH_RE = re.compile(r"^module\[\d+\]\.[^.]+\.source$")
+
+
+def _split_tfvars_eligible_diffs(diff_map):
+    """Split differences into tfvars-eligible and excluded ones.
+
+    Excluded entries include paths that Terraform does not allow to be configured
+    via input variables / tfvars.
+    """
+    eligible = {}
+    excluded = {}
+
+    for path, details in diff_map.items():
+        reason = None
+
+        # Terraform module source addresses must be literal strings at init time.
+        if _MODULE_SOURCE_PATH_RE.match(path):
+            reason = (
+                "module source must be a literal string "
+                "(cannot be parameterized with var/tfvars)"
+            )
+
+        if reason:
+            excluded[path] = reason
+            continue
+
+        eligible[path] = details
+
+    return eligible, excluded
+
+
+def _signature_value(value):
+    """Create a stable string signature for grouping equivalent diffs."""
+    if isinstance(value, (dict, list, tuple, set)):
+        return repr(value)
+    return str(value)
+
 def _extract_var_references(node):
     """
     Collects variable names referenced as var.<name> inside string leaves (and any raw strings).
@@ -106,21 +143,39 @@ def _generate_smart_module_tf(ast1, diff_map):
     var_definitions = []
     var_types = {}  # var_name -> terraform type string
 
-    for path, details in diff_map.items():
-        var_name = _sanitize_var_name(path)
+    used_var_names = set()
+    signature_to_var = {}
 
+    for path, details in diff_map.items():
+        diff_type = details.get("type", "string")
+        signature = (
+            _signature_value(details.get("val1")),
+            _signature_value(details.get("val2")),
+            diff_type,
+        )
+
+        # Collapse repeated equivalent differences (same val1/val2/type) into one input variable.
+        if signature in signature_to_var:
+            variable_map[path] = signature_to_var[signature]
+            continue
+
+        preferred = _extract_single_var_name_from_value(details.get("val1")) or _extract_single_var_name_from_value(details.get("val2"))
+        base_name = preferred or _sanitize_var_name(path)
+
+        var_name = base_name
         counter = 1
-        original_name = var_name
-        while var_name in variable_map.values():
-            var_name = f"{original_name}_{counter}"
+        while var_name in used_var_names:
+            var_name = f"{base_name}_{counter}"
             counter += 1
 
+        used_var_names.add(var_name)
+        signature_to_var[signature] = var_name
         variable_map[path] = var_name
-        var_types[var_name] = details["type"]
+        var_types[var_name] = diff_type
 
         var_def = f'variable "{var_name}" {{\n'
         var_def += f'  description = "Refactored from {path}"\n'
-        var_def += f'  type        = {details["type"]}\n'
+        var_def += f'  type        = {diff_type}\n'
         var_def += "}\n"
         var_definitions.append(var_def)
 
@@ -161,9 +216,13 @@ def _generate_smart_module_call(module_name, diff_map, variable_map, specific_as
     ]
 
     # Parameters that actually differ
+    assigned_vars = set()
     for path, var_name in variable_map.items():
+        if var_name in assigned_vars:
+            continue
         val = diff_map[path]["val1"] if specific_ast_values == "left" else diff_map[path]["val2"]
         call_lines.append(f"  {var_name} = {_hcl_value(val)}")
+        assigned_vars.add(var_name)
 
     # Variables already used in the code (must be passed through)
     for name in sorted(passthrough_vars.keys()):
@@ -172,6 +231,76 @@ def _generate_smart_module_call(module_name, diff_map, variable_map, specific_as
 
     call_lines.append("}")
     return "\n".join(call_lines)
+
+
+def _collect_defined_resources(ast):
+    """Collect top-level Terraform resources defined in an AST."""
+    resources = []
+    for item in ast.get("resource", []) if isinstance(ast, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        for resource_type, named_resources in item.items():
+            if not isinstance(named_resources, dict):
+                continue
+            for resource_name in named_resources.keys():
+                resources.append((resource_type, resource_name))
+    return resources
+
+
+def _generate_module_outputs(ast, consumer_texts=None):
+    """Generate outputs.tf content for externally referenced resource attributes."""
+    consumer_texts = consumer_texts or []
+    resources = _collect_defined_resources(ast)
+    used_attrs = {resource: set() for resource in resources}
+
+    for resource_type, resource_name in resources:
+        pattern = re.compile(
+            rf"\b{re.escape(resource_type)}\.{re.escape(resource_name)}\.([A-Za-z_][A-Za-z0-9_]*)\b"
+        )
+        for text in consumer_texts:
+            if not isinstance(text, str):
+                continue
+            used_attrs[(resource_type, resource_name)].update(pattern.findall(text))
+
+    ref_output_map = {}
+    used_output_names = set()
+    output_blocks = []
+
+    for resource_type, resource_name in resources:
+        attrs = sorted(used_attrs[(resource_type, resource_name)] or {"id"})
+        for attr in attrs:
+            base_name = _sanitize_var_name(f"{resource_name}_{attr}")
+            output_name = base_name
+            counter = 1
+            while output_name in used_output_names:
+                output_name = f"{base_name}_{counter}"
+                counter += 1
+
+            used_output_names.add(output_name)
+            ref_output_map[f"{resource_type}.{resource_name}.{attr}"] = output_name
+            output_blocks.append(
+                f'output "{output_name}" {{\n'
+                f'  value = "${{{resource_type}.{resource_name}.{attr}}}"\n'
+                f'}}\n'
+            )
+
+    return "\n".join(output_blocks), ref_output_map
+
+
+def _rewrite_consumer_hcl(hcl_text, ref_output_map, module_name):
+    """Rewrite direct resource attribute references to module outputs."""
+    rewritten = hcl_text
+    replacements = {}
+
+    for old_ref, output_name in sorted(ref_output_map.items(), key=lambda item: len(item[0]), reverse=True):
+        new_ref = f"module.{module_name}.{output_name}"
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(old_ref)}(?![A-Za-z0-9_])")
+        updated = pattern.sub(new_ref, rewritten)
+        if updated != rewritten:
+            replacements[old_ref] = new_ref
+            rewritten = updated
+
+    return rewritten, replacements
 
 def _generate_module_tf(base_ast, differences):
     """Generates the HCL for a new Terraform module."""
@@ -232,7 +361,7 @@ def _generate_module_tf(base_ast, differences):
 
     return '\n'.join(var_tf_lines), '\n'.join(main_tf_lines)
 
-def _generate_module_call(module_name, differences, original_values):
+def _generate_module_call(module_name, differences, _original_values):
     """Generates the HCL for calling the new module."""
     call_lines = [f'module "{module_name}" {{', '  source = "./modules/{module_name}"\n']
     
@@ -278,15 +407,28 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
       If one side already uses var.<x> for the differing value, we reuse <x>
       instead of creating a new variable name.
     """
+    eligible_diff_map, _ = _split_tfvars_eligible_diffs(diff_map)
+
     variable_map = {}
     var_definitions = []
     var_types = {}
 
     used_names = set()
+    signature_to_var = {}
 
-    for path, details in diff_map.items():
+    for path, details in eligible_diff_map.items():
         v1 = details.get("val1")
         v2 = details.get("val2")
+        diff_type = details.get("type", "string")
+        signature = (
+            _signature_value(v1),
+            _signature_value(v2),
+            diff_type,
+        )
+
+        if signature in signature_to_var:
+            variable_map[path] = signature_to_var[signature]
+            continue
 
         # Prefer reusing an existing variable reference if present on either side
         preferred = _extract_single_var_name_from_value(v1) or _extract_single_var_name_from_value(v2)
@@ -302,8 +444,9 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
                 n += 1
 
         used_names.add(var_name)
+        signature_to_var[signature] = var_name
         variable_map[path] = var_name
-        var_types[var_name] = details.get("type", "string")
+        var_types[var_name] = diff_type
 
         # Declare the variable only if we *introduced* it (i.e., not clearly reused from existing var ref)
         # Heuristic: if preferred was detected, assume it already exists in at least one file.
@@ -323,20 +466,26 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
     # tfvars: emit only literal values; skip those that already were var.* on that side
     left_tfvars_lines = []
     right_tfvars_lines = []
+    left_assigned = set()
+    right_assigned = set()
 
     for path, var_name in variable_map.items():
-        v1 = diff_map[path]["val1"]
-        v2 = diff_map[path]["val2"]
+        v1 = eligible_diff_map[path]["val1"]
+        v2 = eligible_diff_map[path]["val2"]
 
-        if _extract_single_var_name_from_value(v1) is None:
+        if var_name not in left_assigned and _extract_single_var_name_from_value(v1) is None:
             left_tfvars_lines.append(f"{var_name} = {_hcl_value(v1)}")
-        else:
+            left_assigned.add(var_name)
+        elif var_name not in left_assigned:
             left_tfvars_lines.append(f"# {var_name} already comes from var.{var_name} in original left file; no tfvars needed")
+            left_assigned.add(var_name)
 
-        if _extract_single_var_name_from_value(v2) is None:
+        if var_name not in right_assigned and _extract_single_var_name_from_value(v2) is None:
             right_tfvars_lines.append(f"{var_name} = {_hcl_value(v2)}")
-        else:
+            right_assigned.add(var_name)
+        elif var_name not in right_assigned:
             right_tfvars_lines.append(f"# {var_name} already comes from var.{var_name} in original right file; no tfvars needed")
+            right_assigned.add(var_name)
 
     left_tfvars_str = "\n".join(left_tfvars_lines).strip() + "\n"
     right_tfvars_str = "\n".join(right_tfvars_lines).strip() + "\n"
@@ -349,3 +498,36 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
         right_tfvars_str,
         variable_map,
     )
+
+
+def _generate_tfvars_bundle(ast_left, ast_right, diff_map):
+    """Generate an integration-ready tfvars refactoring bundle.
+
+    Returns a dict with a canonical shared template plus per-variant tfvars.
+    """
+    eligible_diff_map, excluded_differences = _split_tfvars_eligible_diffs(diff_map)
+
+    (
+        variables_tf,
+        left_main_tf,
+        right_main_tf,
+        left_tfvars,
+        right_tfvars,
+        variable_map,
+    ) = _generate_tfvars_refactor(ast_left, ast_right, eligible_diff_map)
+
+    shared_main_tf = left_main_tf
+    if right_main_tf != left_main_tf:
+        shared_main_tf = left_main_tf
+
+    return {
+        "variables_tf": variables_tf,
+        "shared_main_tf": shared_main_tf,
+        "left_main_tf": left_main_tf,
+        "right_main_tf": right_main_tf,
+        "left_tfvars": left_tfvars,
+        "right_tfvars": right_tfvars,
+        "variable_map": variable_map,
+        "excluded_differences": excluded_differences,
+        "template_equal": left_main_tf == right_main_tf,
+    }

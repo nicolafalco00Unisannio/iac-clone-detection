@@ -3,11 +3,12 @@ Comprehensive HTML report generation.
 """
 
 from src.core.parser import parse_file
-from src.visualization.graph_viz import _generate_clone_graph_html
 from src.analysis.refactoring import (
     _generate_smart_module_tf,
     _generate_smart_module_call,
-    _generate_tfvars_refactor,
+    _generate_module_outputs,
+    _rewrite_consumer_hcl,
+    _generate_tfvars_bundle,
 )
 from src.analysis.diff_analyzer import _identify_param_differences, classify_clone_type, get_clone_statistics
 
@@ -169,10 +170,10 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                 ast1 = parse_file(p1)
                 ast2 = parse_file(p2)
                 group_type = classify_clone_type(dist, ast1, ast2)
-            except:
+            except OSError:
                 group_type = classify_clone_type(dist) # Fallback
 
-        html_parts.append(f'<div class="clone-group">')
+        html_parts.append('<div class="clone-group">')
         html_parts.append(f'<h3>Clone Group {i+1} <span style="font-size:0.6em; color:#666; border:1px solid #ccc; padding:2px 6px; border-radius:4px; vertical-align:middle; margin-left:10px;">{group_type}</span></h3>')
         html_parts.append('<ul class="file-list">')
         for path in sorted(list(group)):
@@ -199,7 +200,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                 html_parts.append(
                     f'<details class="diff-details"><summary>View diff: {path1_obj.name} ↔ {path2_obj.name}</summary><div class="diff-content">{diff_table}</div></details>'
                 )
-            except Exception as e:
+            except OSError as e:
                 html_parts.append(f'<p> Could not generate diff: {e}</p>')
         
         # --- REFACTORING SUGGESTION LOGIC (Embedded) ---
@@ -237,52 +238,100 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                              # TFVars Strategy
                             only_path = next(iter(diff_map.keys()))
 
-                            (
-                                variables_tf,
-                                left_main_tf,
-                                right_main_tf,
-                                left_tfvars,
-                                right_tfvars,
-                                var_map,
-                            ) = _generate_tfvars_refactor(ast1, ast2, diff_map)
+                            bundle = _generate_tfvars_bundle(ast1, ast2, diff_map)
+                            variables_tf = bundle["variables_tf"]
+                            shared_main_tf = bundle["shared_main_tf"]
+                            left_tfvars = bundle["left_tfvars"]
+                            right_tfvars = bundle["right_tfvars"]
+                            excluded = bundle.get("excluded_differences", {})
+                            eligible_count = len(bundle.get("variable_map", {}))
 
                             left_tfvars_name = _tfvars_name_for(path1)
                             right_tfvars_name = _tfvars_name_for(path2)
-                            
-                            left_apply = f"terraform apply -var-file={left_tfvars_name}" if _tfvars_has_assignments(left_tfvars) else "terraform apply"
-                            right_apply = f"terraform apply -var-file={right_tfvars_name}" if _tfvars_has_assignments(right_tfvars) else "terraform apply"
 
-                            html_parts.append(f"""
-                                <h4>Refactoring Strategy: .tfvars Parameterization</h4>
-                                <p>Detected <strong>{len(diff_map)}</strong> differing parameter (<code>{only_path}</code>).</p>
+                            if eligible_count == 0 and excluded:
+                                excluded_html = "".join(
+                                    f"<li><code>{p}</code>: {r}</li>" for p, r in sorted(excluded.items())
+                                )
+                                html_parts.append(f"""
+                                    <h4>Manual Refactoring Recommended</h4>
+                                    <p>Detected <strong>{len(diff_map)}</strong> differing parameter (<code>{only_path}</code>), but it cannot be safely parameterized via <code>.tfvars</code>.</p>
+                                    <p>Use a literal value per file (or extract a shared local module while keeping this attribute fixed in each root module).</p>
+                                    <h5>Excluded from .tfvars parameterization</h5>
+                                    <ul>{excluded_html}</ul>
+                                """)
+                            else:
+                                left_apply = f"terraform apply -var-file={left_tfvars_name}" if _tfvars_has_assignments(left_tfvars) else "terraform apply"
+                                right_apply = f"terraform apply -var-file={right_tfvars_name}" if _tfvars_has_assignments(right_tfvars) else "terraform apply"
 
-                                <h5>Generated <code>variables.tf</code></h5>
-                                <div class="code-block"><pre>{variables_tf}</pre></div>
+                                excluded_note = ""
+                                if excluded:
+                                    excluded_note = "".join(
+                                        f"<li><code>{p}</code>: {r}</li>" for p, r in sorted(excluded.items())
+                                    )
+                                    excluded_note = (
+                                        "<h5>Excluded from .tfvars parameterization</h5>"
+                                        f"<ul>{excluded_note}</ul>"
+                                    )
 
-                                <h5>Updated <code>{path1.name}</code></h5>
-                                <div class="code-block"><pre>{left_main_tf}</pre></div>
+                                html_parts.append(f"""
+                                    <h4>Refactoring Strategy: .tfvars Parameterization</h4>
+                                    <p>Detected <strong>{len(diff_map)}</strong> differing parameter (<code>{only_path}</code>).</p>
 
-                                <h5>Updated <code>{path2.name}</code></h5>
-                                <div class="code-block"><pre>{right_main_tf}</pre></div>
+                                    <h5>Generated <code>variables.tf</code></h5>
+                                    <div class="code-block"><pre>{variables_tf}</pre></div>
 
-                                <h5>Generated <code>{left_tfvars_name}</code></h5>
-                                <div class="code-block"><pre>{left_tfvars}</pre></div>
-                                
-                                <h5>Generated <code>{right_tfvars_name}</code></h5>
-                                <div class="code-block"><pre>{right_tfvars}</pre></div>
+                                    <h5>Canonical Shared <code>main.tf</code></h5>
+                                    <div class="code-block"><pre>{shared_main_tf}</pre></div>
 
-                                <h5>How to apply</h5>
-                                <ul>
-                                    <li>Apply left: <code>{left_apply}</code></li>
-                                    <li>Apply right: <code>{right_apply}</code></li>
-                                </ul>
-                            """)
+                                    <h5>Generated <code>{left_tfvars_name}</code></h5>
+                                    <div class="code-block"><pre>{left_tfvars}</pre></div>
+
+                                    <h5>Generated <code>{right_tfvars_name}</code></h5>
+                                    <div class="code-block"><pre>{right_tfvars}</pre></div>
+
+                                    {excluded_note}
+
+                                    <h5>How to apply</h5>
+                                    <ul>
+                                        <li>Use the shared <code>main.tf</code> template in both locations.</li>
+                                        <li>Apply left: <code>{left_apply}</code></li>
+                                        <li>Apply right: <code>{right_apply}</code></li>
+                                    </ul>
+                                """)
 
                         else:
                             # Module Strategy
+                            path1_obj = Path(path1)
+                            path2_obj = Path(path2)
                             var_tf, main_tf, var_map, passthrough_vars = _generate_smart_module_tf(ast1, diff_map)
                             call_1 = _generate_smart_module_call(module_name, diff_map, var_map, "left", passthrough_vars)
                             call_2 = _generate_smart_module_call(module_name, diff_map, var_map, "right", passthrough_vars)
+                            consumer_candidates = []
+
+                            for base_path in {path1_obj.parent, path2_obj.parent}:
+                                for tf_path in sorted(base_path.glob("*.tf")):
+                                    if tf_path in {path1_obj, path2_obj}:
+                                        continue
+                                    try:
+                                        consumer_candidates.append((tf_path, tf_path.read_text(encoding="utf-8")))
+                                    except OSError:
+                                        continue
+
+                            outputs_tf, ref_output_map = _generate_module_outputs(
+                                ast1,
+                                [text for _, text in consumer_candidates],
+                            )
+
+                            rewritten_consumers = []
+                            for consumer_path, consumer_text in consumer_candidates:
+                                rewritten_text, replacements = _rewrite_consumer_hcl(
+                                    consumer_text,
+                                    ref_output_map,
+                                    module_name,
+                                )
+                                if replacements:
+                                    rewritten_consumers.append((consumer_path, rewritten_text))
 
                             html_parts.append(f"""
                                 <h4>Refactoring Strategy: Module Extraction</h4>
@@ -298,6 +347,10 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                         <h5>main.tf (Abstracted Logic)</h5>
                                         <div class="code-block"><pre>{main_tf}</pre></div>
                                     </div>
+                                    <div class="code-section">
+                                        <h5>outputs.tf</h5>
+                                        <div class="code-block"><pre>{outputs_tf}</pre></div>
+                                    </div>
                                 </div>
 
                                 <h5>Replacement Code</h5>
@@ -312,10 +365,18 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                     </div>
                                 </div>
                             """)
+
+                            if rewritten_consumers:
+                                html_parts.append('<h5>Updated Consumer Files</h5>')
+                                for consumer_path, rewritten_text in rewritten_consumers:
+                                    html_parts.append(
+                                        f'<div class="code-section"><h5><code>{consumer_path.name}</code></h5>'
+                                        f'<div class="code-block"><pre>{rewritten_text}</pre></div></div>'
+                                    )
                     else:
-                         html_parts.append(f'<p>Could not parse files for refactoring analysis.</p>')
+                        html_parts.append('<p>Could not parse files for refactoring analysis.</p>')
             
-            except Exception as e:
+            except (OSError, ValueError, TypeError, KeyError) as e:
                 html_parts.append(f'<p>Error parsing or analyzing ASTs for refactoring: {e}</p>')
 
             html_parts.append('</div></details>')
