@@ -23,6 +23,23 @@ IGNORED_TOP_LEVEL_KEYS = {
 }
 
 
+def _normalize_address_for_module_refactor(address: str) -> str:
+    """Normalize addresses to ignore module wrapping for refactoring comparisons.
+    
+    Converts:
+      - "module.impl.resource_type.name" -> "resource_type.name"
+    
+    This allows equivalence checks to recognize that extracting resources into 
+    a module is semantically equivalent if the attributes remain unchanged.
+    """
+    parts = address.split(".")
+    # If address starts with "module", skip module parts and return just resource type and name
+    if parts[0] == "module" and len(parts) > 2:
+        # module.impl.resource_type.name -> resource_type.name
+        return ".".join(parts[-2:])
+    return address
+
+
 def _normalize_value(value: Any) -> Any:
     """Recursively normalize values for deterministic comparisons."""
     if isinstance(value, dict):
@@ -52,17 +69,31 @@ def _semantic_view(
     *,
     include_output_changes: bool = True,
     strict: bool = False,
+    normalize_modules: bool = False,
 ) -> dict[str, Any]:
-    """Extract a semantic view of a Terraform plan for equivalence checks."""
+    """Extract a semantic view of a Terraform plan for equivalence checks.
+    
+    Args:
+        plan: The Terraform plan dict to process
+        include_output_changes: Whether to include output_changes in comparison
+        strict: Whether to include after_unknown fields in comparison
+        normalize_modules: If True, normalize resource addresses to ignore module
+                          wrapping (e.g., "module.impl.resource.name" -> "resource.name").
+                          Useful for recognizing module refactorings as equivalent.
+    """
     plan = {
         k: v for k, v in plan.items() if k not in IGNORED_TOP_LEVEL_KEYS
     }
 
     resource_changes = []
     for item in plan.get("resource_changes", []):
+        address = item.get("address")
+        if normalize_modules:
+            address = _normalize_address_for_module_refactor(address)
+        
         resource_changes.append(
             {
-                "address": item.get("address"),
+                "address": address,
                 "mode": item.get("mode"),
                 "type": item.get("type"),
                 "name": item.get("name"),
@@ -127,62 +158,190 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
     content = file_path.read_text(encoding="utf-8", errors="ignore")
     
     resource_changes: list[dict[str, Any]] = []
+    output_changes: dict[str, dict[str, Any]] = {}
     current_resource: Optional[dict[str, Any]] = None
+    current_output = None
     current_attrs: dict[str, Any] = {}
+    in_resources_section = False
+    in_outputs_section = False
     
     for line in content.split("\n"):
         # Skip empty lines
         if not line.strip():
             continue
+        
+        # Detect sections
+        if line.strip().startswith("Plan:"):
+            if current_resource:
+                current_resource["change"]["after"] = current_attrs
+                resource_changes.append(current_resource)
+                current_resource = None
+                current_attrs = {}
+            if current_output:
+                output_changes[current_output] = {"actions": ["create"], "after": current_attrs, "after_unknown": {}}
+                current_output = None
+            in_resources_section = False
+            in_outputs_section = False
+            continue
             
-        # Check for resource change header (e.g., "+ aws_instance.consul_0" or "<= data.template_file.consul_update")
-        # Pattern allows optional leading whitespace
-        match = re.match(r"^\s*([\+\-~<=]+)\s+([^.]+)\.([^\s]+)(?:\s*\(.*\))?$", line)
-        if match:
+        if "Changes to Outputs:" in line:
+            if current_resource:
+                current_resource["change"]["after"] = current_attrs
+                resource_changes.append(current_resource)
+                current_resource = None
+                current_attrs = {}
+            in_resources_section = False
+            in_outputs_section = True
+            continue
+            
+        if "Terraform will perform the following actions:" in line:
+            in_resources_section = True
+            in_outputs_section = False
+            continue
+            
+        if in_outputs_section:
+            # Parse output lines
+            # Example: "  + myoutput = {" or "  ~ otheroutput ="
+            match = re.match(r"^\s*([\+\-~<=]+)\s+([^\s]+)\s+=", line)
+            if match:
+                if current_output:
+                    output_changes[current_output] = {"actions": ["create"], "after": current_attrs, "after_unknown": {}}
+                action_str, output_name = match.groups()
+                current_output = output_name
+                current_attrs = {}
+            elif current_output and re.match(r"^\s{2,}\S+", line):
+                attr_line = line.strip()
+                if attr_line in ("{", "}", "[", "]", "(") or attr_line.startswith("("):
+                    continue
+                if "=" in attr_line:
+                    parts = attr_line.split("=", 1)
+                    key = parts[0].strip().lstrip("+~-=>").strip()
+                    val = parts[1].strip()
+                    if val != "(known after apply)":
+                        current_attrs[key] = val
+                    else:
+                        current_attrs[key] = True  # treat known after apply loosely
+            continue
+        
+        if not in_resources_section:
+            continue
+            
+        # Skip comment lines but capture resource addresses from them
+        if line.strip().startswith("#") and " will be " in line:
+            # Parse address from comment
+            comment = line.strip()[2:].split(" will be ")[0].strip()
+            
             # Save previous resource if exists
             if current_resource:
                 current_resource["change"]["after"] = current_attrs
                 resource_changes.append(current_resource)
             
+            # Extract action from comment
+            if " will be created" in line:
+                actions = ["create"]
+            elif " will be updated" in line:
+                actions = ["update"]
+            elif " will be destroyed" in line:
+                actions = ["delete"]
+            elif " will be read" in line:
+                actions = ["read"]
+            else:
+                actions = ["update"]
+            
+            # Parse the address to extract mode, type, and name
+            parts = comment.split(".")
+            if len(parts) >= 2:
+                # Could be "resource.name" or "module.X.resource.name"
+                if parts[0] == "module":
+                    # module.impl.harness_platform_input_set.inputset
+                    resource_type = parts[-2]
+                    resource_name = parts[-1]
+                    address = comment
+                else:
+                    # resource.name format
+                    resource_type = parts[-2]
+                    resource_name = parts[-1]
+                    address = comment
+                
+                mode = "data" if resource_type.startswith("data.") else "managed"
+                if mode == "data":
+                    resource_type = resource_type.replace("data.", "")
+                
+                current_resource = {
+                    "address": address,
+                    "mode": mode,
+                    "type": resource_type,
+                    "name": resource_name,
+                    "index": None,
+                    "change": {
+                        "actions": actions,
+                        "before": None,
+                        "after": {},
+                        "replace_paths": [],
+                    }
+                }
+                current_attrs = {}
+            continue
+        
+        # Parse resource block line (e.g., "+ resource "harness_platform_input_set" "inputset" {")
+        match = re.match(r"^\s*([\+\-~<=]+)\s+resource\s+\"([^\"]+)\"\s+\"([^\"]+)\"", line)
+        if match:
             action_str, resource_type, resource_name = match.groups()
             
-            # Map action strings to terraform actions
-            action_map = {
-                "+": ["create"],
-                "-": ["delete"],
-                "~": ["update"],
-                "<=": ["read"],  # data source read
-                "<": ["delete"],
-                ">": ["create"],
-            }
-            actions = action_map.get(action_str, ["update"])
-            
-            current_resource = {
-                "address": f"{resource_type}.{resource_name}",
-                "mode": "data" if resource_type.startswith("data.") else "managed",
-                "type": resource_type.replace("data.", ""),
-                "name": resource_name,
-                "index": None,
-                "change": {
-                    "actions": actions,
-                    "before": None,
-                    "after": {},
-                    "replace_paths": [],
+            # If we already captured this from comment, do nothing
+            if current_resource and current_resource["name"] == resource_name and current_resource["type"] == resource_type:
+                pass  # Already processed from comment
+            else:
+                # Save previous resource if exists
+                if current_resource:
+                    current_resource["change"]["after"] = current_attrs
+                    resource_changes.append(current_resource)
+                
+                # Map action strings to terraform actions
+                action_map = {
+                    "+": ["create"],
+                    "-": ["delete"],
+                    "~": ["update"],
+                    "<=": ["read"],
+                    "<": ["delete"],
+                    ">": ["create"],
                 }
-            }
-            current_attrs = {}
+                actions = action_map.get(action_str[0], ["update"])
+                
+                current_resource = {
+                    "address": f"{resource_type}.{resource_name}",
+                    "mode": "managed",
+                    "type": resource_type,
+                    "name": resource_name,
+                    "index": None,
+                    "change": {
+                        "actions": actions,
+                        "before": None,
+                        "after": {},
+                        "replace_paths": [],
+                    }
+                }
+                current_attrs = {}
         
-        # Parse attribute lines (indented with spaces, but more than resource lines)
-        elif line.startswith("      ") and current_resource:
-            # Extract key and value
+        # Parse attribute lines (indented with spaces, but within resource block)
+        elif current_resource and re.match(r"^\s{2,}\S+", line):
             attr_line = line.strip()
-            if ":" in attr_line:
-                parts = attr_line.split(":", 1)
+            # Skip structural lines
+            if attr_line in ("{", "}", "[", "]", "("):
+                continue
+            
+            if "=" in attr_line:
+                # Extract key and value
+                parts = attr_line.split("=", 1)
                 key = parts[0].strip()
                 value = parts[1].strip() if len(parts) > 1 else ""
                 
+                # Skip complex structures for now
+                if value in ("{", "[", "<<-EOT"):
+                    continue
+                
                 # Handle different value formats
-                if value == "<computed>":
+                if value == "(known after apply)":
                     value = None
                 elif value.startswith('"') and value.endswith('"'):
                     # Remove quotes and unescape
@@ -196,15 +355,17 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                 
                 current_attrs[key] = value
     
-    # Don't forget the last resource
+    # Don't forget the last resource or output
     if current_resource:
         current_resource["change"]["after"] = current_attrs
         resource_changes.append(current_resource)
+    if current_output:
+        output_changes[current_output] = {"actions": ["create"], "after": current_attrs, "after_unknown": {}}
     
     # Return a dict structure compatible with JSON plan format
     return {
         "resource_changes": resource_changes,
-        "output_changes": {},
+        "output_changes": output_changes,
     }
 
 
@@ -234,17 +395,29 @@ def compare_plan_dicts(
     *,
     include_output_changes: bool = True,
     strict: bool = False,
+    normalize_modules: bool = False,
 ) -> PlanComparisonResult:
-    """Compare two Terraform plans represented as Python dicts."""
+    """Compare two Terraform plans represented as Python dicts.
+    
+    Args:
+        baseline_plan: The baseline plan dict
+        candidate_plan: The candidate plan dict  
+        include_output_changes: Whether to include output_changes
+        strict: Whether to compare after_unknown fields
+        normalize_modules: If True, ignore module wrapping differences.
+                          Useful for recognizing module refactorings as equivalent.
+    """
     baseline_summary = _semantic_view(
         baseline_plan,
         include_output_changes=include_output_changes,
         strict=strict,
+        normalize_modules=normalize_modules,
     )
     candidate_summary = _semantic_view(
         candidate_plan,
         include_output_changes=include_output_changes,
         strict=strict,
+        normalize_modules=normalize_modules,
     )
 
     return PlanComparisonResult(
@@ -260,8 +433,17 @@ def compare_plan_files(
     *,
     include_output_changes: bool = True,
     strict: bool = False,
+    normalize_modules: bool = False,
 ) -> PlanComparisonResult:
-    """Load plan files (JSON or TXT format) and compare them semantically."""
+    """Load plan files (JSON or TXT format) and compare them semantically.
+    
+    Args:
+        baseline_path: Path to baseline plan file
+        candidate_path: Path to candidate plan file
+        include_output_changes: Whether to include output_changes
+        strict: Whether to compare after_unknown fields
+        normalize_modules: If True, ignore module wrapping differences
+    """
     baseline_data = _load_plan_file(baseline_path)
     candidate_data = _load_plan_file(candidate_path)
     return compare_plan_dicts(
@@ -269,6 +451,7 @@ def compare_plan_files(
         candidate_data,
         include_output_changes=include_output_changes,
         strict=strict,
+        normalize_modules=normalize_modules,
     )
 
 
@@ -291,6 +474,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also compare after_unknown payloads",
     )
+    parser.add_argument(
+        "--normalize-modules",
+        action="store_true",
+        help="Ignore module wrapping differences (treats 'module.X.resource.name' as equivalent to 'resource.name')",
+    )
     return parser
 
 
@@ -303,6 +491,7 @@ def main() -> int:
         args.candidate_plan,
         include_output_changes=not args.ignore_output_changes,
         strict=args.strict,
+        normalize_modules=args.normalize_modules,
     )
 
     if result.equivalent:
