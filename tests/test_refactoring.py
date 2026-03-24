@@ -11,6 +11,7 @@ from src.analysis.refactoring import (
     _rewrite_consumer_hcl,
     _generate_tfvars_bundle,
     _generate_tfvars_refactor,
+    _generate_wrapper_module_suggestion,
 )
 
 
@@ -295,7 +296,7 @@ def test_tfvars_basic(sample_instance_ast, sample_instance_ast_modified, simple_
 
 
 def test_tfvars_reuses_existing_var_name():
-    """If one side already uses var.X, reuse that name and skip new declaration."""
+    """If one side already uses var.X, reuse that name and declare it in generated variables.tf."""
     ast_left = {"ami": "var.my_ami"}
     ast_right = {"ami": "ami-999"}
     diff_map = {
@@ -308,8 +309,8 @@ def test_tfvars_reuses_existing_var_name():
     vars_tf, _, _, left_tfvars, right_tfvars, _ = _generate_tfvars_refactor(
         ast_left, ast_right, diff_map
     )
-    # No new variable declared (reused existing var.my_ami)
-    assert 'variable "my_ami"' not in vars_tf
+    # Reused var name should still be declared for standalone validity.
+    assert 'variable "my_ami"' in vars_tf
 
     # Left tfvars has a comment (already a var ref), right has literal
     assert "# my_ami already comes from" in left_tfvars
@@ -355,7 +356,7 @@ def test_tfvars_collapses_repeated_equivalent_diffs():
     )
 
     assert set(var_map.values()) == {"vpc_id"}
-    assert vars_tf.count('variable "vpc_id"') == 0
+    assert vars_tf.count('variable "vpc_id"') == 1
     assert left_main.count("${var.vpc_id}") == 2
     assert right_main.count("${var.vpc_id}") == 2
     assert left_tfvars.count("vpc_id =") == 1
@@ -454,3 +455,57 @@ def test_tfvars_refactor_skips_non_parameterizable_module_source():
     assert "${var." not in right_main
 
     assert "module[0].dcos-mesos-master.source" in bundle["excluded_differences"]
+
+
+def test_generate_wrapper_module_suggestion_forwards_vars_and_fixed_inputs():
+    ast_template = {
+        "resource": [
+            {
+                "aws_instance": {
+                    "web": {
+                        "ami": "${var.ami}",
+                        "instance_type": "${var.instance_type}",
+                        "tags": {
+                            "Env": "${var.environment}",
+                        },
+                    }
+                }
+            }
+        ]
+    }
+
+    suggestion = _generate_wrapper_module_suggestion(
+        ast_template,
+        canonical_source="../../canonical/web",
+        fixed_inputs={"instance_type": "t2.micro"},
+        output_names=["elb_dns_name", "asg_name"],
+    )
+
+    assert suggestion["strategy"] == "module_wrapper_delegation"
+    assert suggestion["canonical_source"] == "../../canonical/web"
+    assert suggestion["module_instance_name"] == "impl"
+
+    wrapper_main = suggestion["wrapper_main_tf"]
+    assert 'source = "../../canonical/web"' in wrapper_main
+    assert 'instance_type = "t2.micro"' in wrapper_main
+    assert 'ami = "${var.ami}"' in wrapper_main
+    assert 'environment = "${var.environment}"' in wrapper_main
+    assert 'instance_type = "${var.instance_type}"' not in wrapper_main
+
+    wrapper_outputs = suggestion["wrapper_outputs_tf"]
+    assert 'output "asg_name"' in wrapper_outputs
+    assert 'value = "${module.impl.asg_name}"' in wrapper_outputs
+    assert 'output "elb_dns_name"' in wrapper_outputs
+    assert 'value = "${module.impl.elb_dns_name}"' in wrapper_outputs
+
+
+def test_generate_wrapper_module_suggestion_outputs_fallback_is_comment_only():
+    ast_template = {"resource": []}
+
+    suggestion = _generate_wrapper_module_suggestion(
+        ast_template,
+        canonical_source="../canonical",
+    )
+
+    assert 'output ""' not in suggestion["wrapper_outputs_tf"]
+    assert "No output names were discovered automatically" in suggestion["wrapper_outputs_tf"]

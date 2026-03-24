@@ -448,15 +448,16 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
         variable_map[path] = var_name
         var_types[var_name] = diff_type
 
-        # Declare the variable only if we *introduced* it (i.e., not clearly reused from existing var ref)
-        # Heuristic: if preferred was detected, assume it already exists in at least one file.
-        if not preferred:
-            var_definitions.append(
-                f'variable "{var_name}" {{\n'
-                f'  description = "Refactored from {path}"\n'
-                f'  type        = {var_types[var_name]}\n'
-                f'}}\n'
-            )
+        # Always declare variables referenced by the generated shared template.
+        # Reused names (detected via existing var.<name> references) may not have
+        # a matching variables.tf in the target location, which causes runtime
+        # errors like "unknown variable referenced".
+        var_definitions.append(
+            f'variable "{var_name}" {{\n'
+            f'  description = "Refactored from {path}"\n'
+            f'  type        = {var_types[var_name]}\n'
+            f'}}\n'
+        )
 
     variables_tf_str = "\n".join(var_definitions).strip() + ("\n" if var_definitions else "")
 
@@ -530,4 +531,78 @@ def _generate_tfvars_bundle(ast_left, ast_right, diff_map):
         "variable_map": variable_map,
         "excluded_differences": excluded_differences,
         "template_equal": left_main_tf == right_main_tf,
+    }
+
+
+def _generate_wrapper_module_suggestion(
+    ast_template,
+    canonical_source,
+    module_instance_name="impl",
+    fixed_inputs=None,
+    output_names=None,
+):
+    """Build a wrapper-module delegation suggestion for Type 1 clone removal.
+
+    The wrapper keeps only a module call that forwards all referenced variables
+    and optionally pins selected inputs to literal values.
+    """
+    fixed_inputs = fixed_inputs or {}
+    output_names = output_names or []
+    passthrough_vars = sorted(_extract_var_references(ast_template) - set(fixed_inputs.keys()))
+
+    # Generate wrapper variables.tf to declare all passthrough variables
+    var_blocks = []
+    for name in passthrough_vars:
+        var_blocks.append(
+            f'variable "{name}" {{\n'
+            f'  description = "Pass-through variable for canonical module"\n'
+            f'  type        = any\n'
+            f'}}\n'
+        )
+    variables_tf = "\n".join(var_blocks).strip() + ("\n" if var_blocks else "")
+
+    wrapper_lines = [
+        f'module "{module_instance_name}" {{',
+        f'  source = "{canonical_source}"',
+    ]
+
+    for name in sorted(fixed_inputs.keys()):
+        wrapper_lines.append(f"  {name} = {_hcl_value(fixed_inputs[name])}")
+
+    for name in passthrough_vars:
+        wrapper_lines.append(f'  {name} = "${{var.{name}}}"')
+
+    wrapper_lines.append("}")
+
+    if output_names:
+        output_blocks = []
+        for name in sorted(output_names):
+            output_blocks.append(
+                f'output "{name}" {{\n'
+                f'  value = "${{module.{module_instance_name}.{name}}}"\n'
+                f'}}\n'
+            )
+        outputs_tf = "\n".join(output_blocks).rstrip() + "\n"
+    else:
+        outputs_tf = (
+            "# No output names were discovered automatically.\n"
+            "# For each existing output in the duplicate module, forward it as:\n"
+            f'# output "<output_name>" {{ value = "${{module.{module_instance_name}.<output_name>}}" }}\n'
+        )
+
+    return {
+        "strategy": "module_wrapper_delegation",
+        "canonical_source": canonical_source,
+        "module_instance_name": module_instance_name,
+        "passthrough_variables": passthrough_vars,
+        "fixed_inputs": fixed_inputs,
+        "wrapper_variables_tf": variables_tf,
+        "wrapper_main_tf": "\n".join(wrapper_lines),
+        "wrapper_outputs_tf": outputs_tf,
+        "steps": [
+            "Keep only one canonical implementation module.",
+            "Replace duplicate implementation with the wrapper module call.",
+            "Forward existing outputs from wrapper to module outputs.",
+            "Keep per-environment values in tfvars or caller modules.",
+        ],
     }

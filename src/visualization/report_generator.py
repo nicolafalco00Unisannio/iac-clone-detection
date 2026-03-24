@@ -9,6 +9,7 @@ from src.analysis.refactoring import (
     _generate_module_outputs,
     _rewrite_consumer_hcl,
     _generate_tfvars_bundle,
+    _generate_wrapper_module_suggestion,
 )
 from src.analysis.diff_analyzer import _identify_param_differences, classify_clone_type, get_clone_statistics
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from itertools import combinations
 import hashlib
 import re
+import os
 
 def _tfvars_name_for(path: Path) -> str:
     """
@@ -42,6 +44,71 @@ def _tfvars_has_assignments(tfvars_text: str) -> bool:
         if re.search(r"\S\s*=\s*\S", s):
             return True
     return False
+
+
+def _extract_output_names_from_file(outputs_tf_path: Path):
+    """Extract Terraform output names from an outputs.tf file."""
+    try:
+        text = outputs_tf_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    return re.findall(r'^\s*output\s+"([^"]+)"\s*\{', text, flags=re.MULTILINE)
+
+
+def _extract_output_names_from_module_dir(module_dir: Path):
+    """Extract Terraform output names from all .tf files in a module directory."""
+    output_names = set()
+    for tf_path in sorted(module_dir.glob("*.tf")):
+        try:
+            text = tf_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        output_names.update(
+            re.findall(r'^\s*output\s+"([^"]+)"\s*\{', text, flags=re.MULTILINE)
+        )
+    return sorted(output_names)
+
+
+def _count_top_level_blocks(ast, block_name: str) -> int:
+    """Count top-level Terraform blocks of a given type inside a parsed AST."""
+    if not isinstance(ast, dict):
+        return 0
+
+    blocks = ast.get(block_name, [])
+    if not isinstance(blocks, list):
+        return 0
+
+    total = 0
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        for _block_type, named_blocks in item.items():
+            if isinstance(named_blocks, dict):
+                total += len(named_blocks)
+    return total
+
+
+def _looks_like_wrapper_module(ast) -> bool:
+    """Heuristic: wrapper modules usually have module blocks but no resources/data."""
+    module_count = _count_top_level_blocks(ast, "module")
+    resource_count = _count_top_level_blocks(ast, "resource")
+    data_count = _count_top_level_blocks(ast, "data")
+    return module_count > 0 and resource_count == 0 and data_count == 0
+
+
+def _choose_canonical_and_wrapper(path1_obj: Path, path2_obj: Path, ast1, ast2):
+    """Choose canonical implementation and duplicate wrapper side deterministically."""
+    ast1_is_wrapper = _looks_like_wrapper_module(ast1)
+    ast2_is_wrapper = _looks_like_wrapper_module(ast2)
+
+    if ast1_is_wrapper and not ast2_is_wrapper:
+        return (path2_obj, ast2), (path1_obj, ast1)
+    if ast2_is_wrapper and not ast1_is_wrapper:
+        return (path1_obj, ast1), (path2_obj, ast2)
+
+    # Stable fallback for equally-structured modules.
+    return (path1_obj, ast1), (path2_obj, ast2)
 
 def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="clone_report.html"):
     """
@@ -229,9 +296,37 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                         diff_map = _identify_param_differences(ast1, ast2)
 
                         if not diff_map:
+                            path1_obj = Path(path1)
+                            path2_obj = Path(path2)
+                            (canonical_path, _canonical_ast), (wrapper_path, wrapper_ast) = _choose_canonical_and_wrapper(
+                                path1_obj,
+                                path2_obj,
+                                ast1,
+                                ast2,
+                            )
+                            canonical_dir = canonical_path.parent
+                            wrapper_dir = wrapper_path.parent
+                            canonical_source = Path(
+                                os.path.relpath(canonical_dir, wrapper_dir)
+                            ).as_posix()
+                            output_names = _extract_output_names_from_module_dir(canonical_dir)
+                            wrapper = _generate_wrapper_module_suggestion(
+                                wrapper_ast,
+                                canonical_source=canonical_source,
+                                module_instance_name="impl",
+                                output_names=output_names,
+                            )
+
                             html_parts.append(
-                                f'<h4>Simple Deduplication</h4>'
-                                f'<p>Files {path1.name} and {path2.name} appear structurally identical. Recommend simple file deduplication.</p>'
+                                f'<h4>Refactoring Strategy: Wrapper Module Delegation (Type 1)</h4>'
+                                f'<p>Files <code>{path1_obj.name}</code> and <code>{path2_obj.name}</code> are structurally identical.</p>'
+                                f'<p>Keep <code>{canonical_path}</code> as canonical implementation and turn <code>{wrapper_path}</code> into a wrapper.</p>'
+                                f'<h5>Wrapper <code>variables.tf</code> (in duplicate location)</h5>'
+                                f'<div class="code-block"><pre>{wrapper["wrapper_variables_tf"]}</pre></div>'
+                                f'<h5>Wrapper <code>main.tf</code> (in duplicate location)</h5>'
+                                f'<div class="code-block"><pre>{wrapper["wrapper_main_tf"]}</pre></div>'
+                                f'<h5>Wrapper <code>outputs.tf</code></h5>'
+                                f'<div class="code-block"><pre>{wrapper["wrapper_outputs_tf"]}</pre></div>'
                             )
                         
                         elif len(diff_map) < 2:
@@ -300,6 +395,40 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                     </ul>
                                 """)
 
+                                if bundle.get("template_equal"):
+                                    path1_obj = Path(path1)
+                                    path2_obj = Path(path2)
+                                    (canonical_path, _canonical_ast), (wrapper_path, wrapper_ast) = _choose_canonical_and_wrapper(
+                                        path1_obj,
+                                        path2_obj,
+                                        ast1,
+                                        ast2,
+                                    )
+                                    canonical_dir = canonical_path.parent
+                                    wrapper_dir = wrapper_path.parent
+                                    canonical_source = Path(
+                                        os.path.relpath(canonical_dir, wrapper_dir)
+                                    ).as_posix()
+                                    output_names = _extract_output_names_from_module_dir(canonical_dir)
+                                    wrapper = _generate_wrapper_module_suggestion(
+                                        wrapper_ast,
+                                        canonical_source=canonical_source,
+                                        module_instance_name="impl",
+                                        output_names=output_names,
+                                    )
+
+                                    html_parts.append(f"""
+                                        <h4>Follow-up Strategy: Wrapper Module Delegation</h4>
+                                        <p>After .tfvars normalization, both templates are identical (<strong>Type 1</strong>).</p>
+                                        <p>Keep one canonical implementation and replace the other with a wrapper module.</p>
+
+                                        <h5>Wrapper <code>main.tf</code> (in duplicate location)</h5>
+                                        <div class="code-block"><pre>{wrapper["wrapper_main_tf"]}</pre></div>
+
+                                        <h5>Wrapper <code>outputs.tf</code></h5>
+                                        <div class="code-block"><pre>{wrapper["wrapper_outputs_tf"]}</pre></div>
+                                    """)
+
                         else:
                             # Module Strategy
                             path1_obj = Path(path1)
@@ -356,11 +485,11 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                 <h5>Replacement Code</h5>
                                 <div class="code-container">
                                     <div class="code-section">
-                                        <h5>Replaces original code in <code>{path1.name}</code></h5>
+                                        <h5>Replaces original code in <code>{path1_obj.name}</code></h5>
                                         <div class="code-block"><pre>{call_1}</pre></div>
                                     </div>
                                     <div class="code-section">
-                                        <h5>Replaces original code in <code>{path2.name}</code></h5>
+                                        <h5>Replaces original code in <code>{path2_obj.name}</code></h5>
                                         <div class="code-block"><pre>{call_2}</pre></div>
                                     </div>
                                 </div>
