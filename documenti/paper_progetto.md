@@ -330,6 +330,25 @@ I test coprono l'intero percorso logico della pipeline: dal parsing di file Terr
 
 Le fixture condivise (`conftest.py`) forniscono AST di esempio rappresentativi dei casi d'uso principali: risorse AWS con parametri identici (per Type 1), con valori diversi (per Type 2), con differenze strutturali (per Type 3), e directory temporanee con file `.tf` validi e invalidi per i test del file finder. Tutti i test sono eseguibili con il comando `pytest tests/ -v` e completano in meno di 1 secondo.
 
+### 3.6 Validazione Empirica dei Suggerimenti di Refactoring
+
+Oltre ai test unitari sui generatori di codice HCL, abbiamo aggiunto una validazione empirica end-to-end dei suggerimenti di refactoring su quattro progetti reali. Per ciascun caso, confrontiamo il piano Terraform **pre-refactoring** con quello **post-refactoring** tramite il tool di equivalenza semantica (`plan_equivalence.py`), verificando che la trasformazione preservi il comportamento infrastrutturale.
+
+Le fixture dei piani sono salvate con naming `pre_<id>` e `post_<id>` (formato JSON o TXT da `terraform show`).
+
+La Tabella seguente riassume i quattro casi validati:
+
+| Project ID | Tipo clone | Strategia di refactoring | Piano | Normalizzazione | Esito |
+|------------|------------|--------------------------|-------|-----------------|-------|
+| 104546844 | Type 2 | Estrazione in modulo | TXT | `normalize_modules=True` | PASS |
+| 104919803 | Type 2 | Parametrizzazione con tfvars | TXT | `normalize_modules=True` | PASS |
+| 578269253 | Type 2 | Estrazione in modulo | JSON | `normalize_modules=True`, `normalize_label_separators=True` | PASS |
+| 800611402 | Type 1 | Deduplicazione semplice | JSON | `normalize_modules=True` | PASS |
+
+Il caso `578269253` richiede anche la normalizzazione dei separatori delle label (`-` vs `_`), poiche il refactoring preserva la semantica ma introduce una variazione lessicale nei nomi interni. Questo comportamento è coerente con i limiti noti del confronto puramente sintattico e con la necessita di normalizzazioni controllate per evitare falsi negativi.
+
+Questa validazione aumenta la confidenza pratica nei suggerimenti prodotti: non solo il codice generato è sintatticamente valido, ma mantiene anche l'equivalenza semantica dei piani in casi reali di refactoring.
+
 ---
 
 ## 4. Esperimenti
@@ -425,6 +444,17 @@ L'analisi delle **8,048** coppie di cloni rilevate, combinata con la letteratura
 **Opportunità di refactoring.** I cloni di Tipo 2 rappresentano la categoria con il maggiore potenziale di refactoring. L'analisi mostra numerose coppie di file con struttura identica e differenze limitate a 1-3 parametri (nomi di risorsa, AMI ID, instance type), per le quali il tool genera automaticamente suggerimenti concreti: estrazione in modulo per coppie con molte differenze, parametrizzazione tramite `tfvars` per coppie con poche differenze.
 
 **Rischio di sicurezza.** La presenza di cloni di Tipo 1 e 2 con impostazioni di sicurezza (security group, IAM policy) implica che una correzione di vulnerabilità applicata a un file potrebbe non essere propagata ai suoi cloni, confermando le osservazioni di Rahman e Williams [2019].
+
+**Validazione su refactoring reali.** Per rafforzare le evidenze qualitative, abbiamo ispezionato quattro casi reali di refactoring (stesse fixture usate nella validazione pre/post dei piani). In tutti i casi il pattern osservato è coerente: le risorse duplicate vengono rimosse dal file target e sostituite da una chiamata `module`, riducendo duplicazione strutturale senza introdurre nuove risorse nel target.
+
+| Project ID | Pattern di refactoring | Trasformazione osservata nel target | Delta principale |
+|------------|------------------------|-------------------------------------|------------------|
+| 104546844 | Module extraction (modulo condiviso) | `firewalls.tf` passa da implementazione diretta a modulo `common_module_9` (`source = ../../shared/modules/common_module_9`) | 18 risorse `aws_security_group`/`aws_security_group_rule` rimosse e delegate al modulo |
+| 104919803 | Wrapper delegation (canonical clone reuse) | `main.tf` passa da risorse dirette a wrapper `module "impl"` verso il clone canonico | 12 risorse AWS (ASG, ELB, launch config, SG/rule, alarm) rimosse dal target |
+| 578269253 | Module extraction (modulo locale) | `prepare-backend/main.tf` passa a `module "common_module_1069"` con modulo locale estratto | 8 risorse IBM/local rimosse dal target; aggiunta directory `modules/common_module_1069/` |
+| 800611402 | Wrapper delegation (cross-project reuse) | `main.tf` passa a wrapper `module "impl"` verso la controparte CI; aggiunto `variables.tf` | 9 risorse Harness rimosse dal target; input esplicitati tramite variabili |
+
+Questa analisi è allineata alla verifica di equivalenza dei piani: i quattro casi risultano semanticamente equivalenti tra pre e post refactoring con normalizzazione dei moduli; il caso `578269253` richiede anche normalizzazione dei separatori di label (`-`/`_`) per evitare falsi negativi lessicali.
 
 ### RQ3: Which clone types are more common?
 
