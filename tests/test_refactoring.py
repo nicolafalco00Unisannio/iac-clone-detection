@@ -4,9 +4,14 @@ from src.analysis.refactoring import (
     _extract_single_var_name_from_value,
     _extract_var_references,
     _render_hcl_recursive,
+    _split_tfvars_eligible_diffs,
     _generate_smart_module_tf,
     _generate_smart_module_call,
+    _generate_module_outputs,
+    _rewrite_consumer_hcl,
+    _generate_tfvars_bundle,
     _generate_tfvars_refactor,
+    _generate_wrapper_module_suggestion,
 )
 
 
@@ -121,7 +126,7 @@ def test_smart_module_single_diff(sample_instance_ast, simple_diff_map):
 
 
 def test_smart_module_multi_diff(sample_instance_ast, multi_diff_map):
-    vars_tf, main_tf, var_map, _ = _generate_smart_module_tf(
+    vars_tf, _, var_map, _ = _generate_smart_module_tf(
         sample_instance_ast, multi_diff_map
     )
     # Two variables declared
@@ -204,13 +209,76 @@ def test_module_call_with_passthrough(simple_diff_map):
     assert "${var.region}" in result
 
 
+def test_smart_module_collapses_repeated_equivalent_diffs():
+    """Repeated val1/val2/type diffs should map to one semantic variable."""
+    diff_map = {
+        "resource[0].aws_security_group.default_egress.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+        "resource[2].aws_security_group.admin_access.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+        "resource[4].aws_security_group.consul_client.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+        "resource[9].aws_security_group.consul.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+    }
+
+    vars_tf, _, var_map, _ = _generate_smart_module_tf({}, diff_map)
+    assert set(var_map.values()) == {"vpc_id"}
+    assert vars_tf.count('variable "vpc_id"') == 1
+
+    call_left = _generate_smart_module_call("firewalls", diff_map, var_map, "left")
+    assert call_left.count("vpc_id =") == 1
+
+
+def test_generate_module_outputs_and_rewire_consumer():
+    ast = {
+        "resource": [
+            {
+                "aws_security_group": {
+                    "default_egress": {"vpc_id": "var.vpc_id"},
+                    "admin_access": {"vpc_id": "var.vpc_id"},
+                }
+            }
+        ]
+    }
+    consumer = (
+        'resource "aws_instance" "web" {\n'
+        '  vpc_security_group_ids = ["${aws_security_group.default_egress.id}", "${aws_security_group.admin_access.id}"]\n'
+        '}\n'
+    )
+
+    outputs_tf, ref_output_map = _generate_module_outputs(ast, [consumer])
+
+    assert 'output "default_egress_id"' in outputs_tf
+    assert 'output "admin_access_id"' in outputs_tf
+    assert ref_output_map["aws_security_group.default_egress.id"] == "default_egress_id"
+
+    rewritten, replacements = _rewrite_consumer_hcl(consumer, ref_output_map, "consul_firewalls")
+
+    assert "module.consul_firewalls.default_egress_id" in rewritten
+    assert "module.consul_firewalls.admin_access_id" in rewritten
+    assert replacements["aws_security_group.default_egress.id"] == "module.consul_firewalls.default_egress_id"
+
+
 # ---------------------------------------------------------------------------
 # _generate_tfvars_refactor
 # ---------------------------------------------------------------------------
 
 
 def test_tfvars_basic(sample_instance_ast, sample_instance_ast_modified, simple_diff_map):
-    vars_tf, left_main, right_main, left_tfvars, right_tfvars, var_map = (
+    vars_tf, left_main, right_main, left_tfvars, right_tfvars, _ = (
         _generate_tfvars_refactor(
             sample_instance_ast, sample_instance_ast_modified, simple_diff_map
         )
@@ -228,7 +296,7 @@ def test_tfvars_basic(sample_instance_ast, sample_instance_ast_modified, simple_
 
 
 def test_tfvars_reuses_existing_var_name():
-    """If one side already uses var.X, reuse that name and skip new declaration."""
+    """If one side already uses var.X, reuse that name and declare it in generated variables.tf."""
     ast_left = {"ami": "var.my_ami"}
     ast_right = {"ami": "ami-999"}
     diff_map = {
@@ -241,9 +309,203 @@ def test_tfvars_reuses_existing_var_name():
     vars_tf, _, _, left_tfvars, right_tfvars, _ = _generate_tfvars_refactor(
         ast_left, ast_right, diff_map
     )
-    # No new variable declared (reused existing var.my_ami)
-    assert 'variable "my_ami"' not in vars_tf
+    # Reused var name should still be declared for standalone validity.
+    assert 'variable "my_ami"' in vars_tf
 
     # Left tfvars has a comment (already a var ref), right has literal
     assert "# my_ami already comes from" in left_tfvars
     assert 'my_ami = "ami-999"' in right_tfvars
+
+
+def test_tfvars_collapses_repeated_equivalent_diffs():
+    ast_left = {
+        "resource": [
+            {
+                "aws_security_group": {
+                    "default_egress": {"vpc_id": "${aws_vpc.main.id}"},
+                    "admin_access": {"vpc_id": "${aws_vpc.main.id}"},
+                }
+            }
+        ]
+    }
+    ast_right = {
+        "resource": [
+            {
+                "aws_security_group": {
+                    "default_egress": {"vpc_id": "${var.vpc_id}"},
+                    "admin_access": {"vpc_id": "${var.vpc_id}"},
+                }
+            }
+        ]
+    }
+    diff_map = {
+        "resource[0].aws_security_group.default_egress.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+        "resource[0].aws_security_group.admin_access.vpc_id": {
+            "val1": "${aws_vpc.main.id}",
+            "val2": "${var.vpc_id}",
+            "type": "string",
+        },
+    }
+
+    vars_tf, left_main, right_main, left_tfvars, right_tfvars, var_map = _generate_tfvars_refactor(
+        ast_left, ast_right, diff_map
+    )
+
+    assert set(var_map.values()) == {"vpc_id"}
+    assert vars_tf.count('variable "vpc_id"') == 1
+    assert left_main.count("${var.vpc_id}") == 2
+    assert right_main.count("${var.vpc_id}") == 2
+    assert left_tfvars.count("vpc_id =") == 1
+    assert "already comes from var.vpc_id" in right_tfvars
+
+
+def test_tfvars_bundle_uses_canonical_shared_template(sample_instance_ast):
+    modified_ast = {
+        "resource": [
+            {
+                "aws_instance": {
+                    "web_server": {
+                        "ami": "ami-67890",
+                        "instance_type": "t2.micro",
+                        "tags": {"Name": "WebServer"},
+                    }
+                }
+            }
+        ]
+    }
+    diff_map = {
+        "resource[0].aws_instance.web_server.ami": {
+            "val1": "ami-12345",
+            "val2": "ami-67890",
+            "type": "string",
+        }
+    }
+    bundle = _generate_tfvars_bundle(
+        sample_instance_ast,
+        modified_ast,
+        diff_map,
+    )
+
+    assert bundle["template_equal"] is True
+    assert bundle["shared_main_tf"] == bundle["left_main_tf"] == bundle["right_main_tf"]
+    assert "${var.ami}" in bundle["shared_main_tf"]
+
+
+def test_split_tfvars_excludes_module_source_path():
+    diff_map = {
+        "module[0].dcos-mesos-master.source": {
+            "val1": "git@github.com:mesosphere/terraform-dcos-enterprise//tf_dcos_core",
+            "val2": "git@github.com:amitaekbote/terraform-dcos-enterprise//tf_dcos_core?ref=addnode",
+            "type": "string",
+        }
+    }
+
+    eligible, excluded = _split_tfvars_eligible_diffs(diff_map)
+
+    assert not eligible
+    assert "module[0].dcos-mesos-master.source" in excluded
+    assert "literal string" in excluded["module[0].dcos-mesos-master.source"]
+
+
+def test_tfvars_refactor_skips_non_parameterizable_module_source():
+    ast_left = {
+        "module": [
+            {
+                "dcos-mesos-master": {
+                    "source": "git@github.com:mesosphere/terraform-dcos-enterprise//tf_dcos_core",
+                    "role": "dcos-mesos-master",
+                }
+            }
+        ]
+    }
+    ast_right = {
+        "module": [
+            {
+                "dcos-mesos-master": {
+                    "source": "git@github.com:amitaekbote/terraform-dcos-enterprise//tf_dcos_core?ref=addnode",
+                    "role": "dcos-mesos-master",
+                }
+            }
+        ]
+    }
+    diff_map = {
+        "module[0].dcos-mesos-master.source": {
+            "val1": ast_left["module"][0]["dcos-mesos-master"]["source"],
+            "val2": ast_right["module"][0]["dcos-mesos-master"]["source"],
+            "type": "string",
+        }
+    }
+
+    vars_tf, left_main, right_main, left_tfvars, right_tfvars, var_map = _generate_tfvars_refactor(
+        ast_left,
+        ast_right,
+        diff_map,
+    )
+    bundle = _generate_tfvars_bundle(ast_left, ast_right, diff_map)
+
+    assert vars_tf == ""
+    assert var_map == {}
+    assert left_tfvars.strip() == ""
+    assert right_tfvars.strip() == ""
+    assert "${var." not in left_main
+    assert "${var." not in right_main
+
+    assert "module[0].dcos-mesos-master.source" in bundle["excluded_differences"]
+
+
+def test_generate_wrapper_module_suggestion_forwards_vars_and_fixed_inputs():
+    ast_template = {
+        "resource": [
+            {
+                "aws_instance": {
+                    "web": {
+                        "ami": "${var.ami}",
+                        "instance_type": "${var.instance_type}",
+                        "tags": {
+                            "Env": "${var.environment}",
+                        },
+                    }
+                }
+            }
+        ]
+    }
+
+    suggestion = _generate_wrapper_module_suggestion(
+        ast_template,
+        canonical_source="../../canonical/web",
+        fixed_inputs={"instance_type": "t2.micro"},
+        output_names=["elb_dns_name", "asg_name"],
+    )
+
+    assert suggestion["strategy"] == "module_wrapper_delegation"
+    assert suggestion["canonical_source"] == "../../canonical/web"
+    assert suggestion["module_instance_name"] == "impl"
+
+    wrapper_main = suggestion["wrapper_main_tf"]
+    assert 'source = "../../canonical/web"' in wrapper_main
+    assert 'instance_type = "t2.micro"' in wrapper_main
+    assert 'ami = "${var.ami}"' in wrapper_main
+    assert 'environment = "${var.environment}"' in wrapper_main
+    assert 'instance_type = "${var.instance_type}"' not in wrapper_main
+
+    wrapper_outputs = suggestion["wrapper_outputs_tf"]
+    assert 'output "asg_name"' in wrapper_outputs
+    assert 'value = "${module.impl.asg_name}"' in wrapper_outputs
+    assert 'output "elb_dns_name"' in wrapper_outputs
+    assert 'value = "${module.impl.elb_dns_name}"' in wrapper_outputs
+
+
+def test_generate_wrapper_module_suggestion_outputs_fallback_is_comment_only():
+    ast_template = {"resource": []}
+
+    suggestion = _generate_wrapper_module_suggestion(
+        ast_template,
+        canonical_source="../canonical",
+    )
+
+    assert 'output ""' not in suggestion["wrapper_outputs_tf"]
+    assert "No output names were discovered automatically" in suggestion["wrapper_outputs_tf"]
