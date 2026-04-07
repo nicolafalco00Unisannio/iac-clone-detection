@@ -51,6 +51,7 @@ def _persist_checkpoint_payload(checkpoint_path: Path, payload) -> None:
     checkpoint_text = json.dumps(_to_json_compatible(payload), indent=2)
     last_error = None
 
+    # Atomic write: write to .tmp then replace, so the file won't corrupt if the process dies
     for attempt in range(5):
         tmp_path = checkpoint_path.with_name(
             f"{checkpoint_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -395,13 +396,8 @@ def main():
             logging.info("Partial report generated: %s", report_output)
             logging.info("Resume with: --per_project --resume_checkpoint --checkpoint_file %s", checkpoint_path)
     else:
-        # Detect clones for entire root
         clone_pairs = detect_clones_smart(args.root_dir, args.limit, args.threshold)
-        
-        # Build clone groups
         clone_groups = _build_clone_groups(clone_pairs)
-        
-        # Generate report
         try:
             generate_comprehensive_report(clone_pairs, clone_groups, args.output)
         except KeyboardInterrupt:

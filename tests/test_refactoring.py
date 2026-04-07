@@ -15,11 +15,6 @@ from src.analysis.refactoring import (
 )
 
 
-# ---------------------------------------------------------------------------
-# _extract_single_var_name_from_value
-# ---------------------------------------------------------------------------
-
-
 def test_extract_single_var_bare():
     assert _extract_single_var_name_from_value("var.region") == "region"
 
@@ -42,11 +37,6 @@ def test_extract_single_var_no_match():
     assert _extract_single_var_name_from_value("just a plain string") is None
 
 
-# ---------------------------------------------------------------------------
-# _extract_var_references
-# ---------------------------------------------------------------------------
-
-
 def test_extract_refs_from_string():
     assert _extract_var_references("var.region") == {"region"}
 
@@ -64,11 +54,6 @@ def test_extract_refs_from_nested():
 def test_extract_refs_none():
     assert _extract_var_references({"key": "no refs here"}) == set()
     assert _extract_var_references(42) == set()
-
-
-# ---------------------------------------------------------------------------
-# _render_hcl_recursive
-# ---------------------------------------------------------------------------
 
 
 def test_render_leaf_string():
@@ -101,27 +86,18 @@ def test_render_resource_block(sample_instance_ast):
     assert 'ami = "ami-12345"' in result
 
 
-# ---------------------------------------------------------------------------
-# _generate_smart_module_tf
-# ---------------------------------------------------------------------------
-
-
 def test_smart_module_single_diff(sample_instance_ast, simple_diff_map):
     vars_tf, main_tf, var_map, passthrough = _generate_smart_module_tf(
         sample_instance_ast, simple_diff_map
     )
-    # One variable declared
     assert 'variable "ami"' in vars_tf
     assert "type        = string" in vars_tf
 
-    # main.tf injects the variable reference
     assert "${var.ami}" in main_tf
 
-    # variable_map has the path mapped
     assert "resource[0].aws_instance.web_server.ami" in var_map
     assert var_map["resource[0].aws_instance.web_server.ami"] == "ami"
 
-    # No passthrough vars (no var.* in original AST)
     assert passthrough == {}
 
 
@@ -129,7 +105,6 @@ def test_smart_module_multi_diff(sample_instance_ast, multi_diff_map):
     vars_tf, _, var_map, _ = _generate_smart_module_tf(
         sample_instance_ast, multi_diff_map
     )
-    # Two variables declared
     assert 'variable "ami"' in vars_tf
     assert 'variable "instance_type"' in vars_tf
     assert len(var_map) == 2
@@ -158,7 +133,6 @@ def test_smart_module_passthrough_var():
     }
     vars_tf, _, _, passthrough = _generate_smart_module_tf(ast_with_var, diff_map)
 
-    # my_ami is detected as passthrough
     assert "my_ami" in passthrough
     assert 'variable "my_ami"' in vars_tf
     assert "Pass-through variable" in vars_tf
@@ -172,14 +146,9 @@ def test_smart_module_name_collision():
     }
     _, _, var_map, _ = _generate_smart_module_tf({}, diff_map)
     names = list(var_map.values())
-    assert len(set(names)) == 2  # no duplicates
+    assert len(set(names)) == 2
     assert "ami" in names
     assert "ami_1" in names
-
-
-# ---------------------------------------------------------------------------
-# _generate_smart_module_call
-# ---------------------------------------------------------------------------
 
 
 def test_module_call_left_values(simple_diff_map):
@@ -189,7 +158,7 @@ def test_module_call_left_values(simple_diff_map):
     )
     assert 'module "web_server"' in result
     assert 'source = "./modules/web_server"' in result
-    assert 'ami = "ami-12345"' in result  # val1
+    assert 'ami = "ami-12345"' in result
 
 
 def test_module_call_right_values(simple_diff_map):
@@ -197,7 +166,7 @@ def test_module_call_right_values(simple_diff_map):
     result = _generate_smart_module_call(
         "web_server", simple_diff_map, var_map, "right"
     )
-    assert 'ami = "ami-67890"' in result  # val2
+    assert 'ami = "ami-67890"' in result
 
 
 def test_module_call_with_passthrough(simple_diff_map):
@@ -272,25 +241,17 @@ def test_generate_module_outputs_and_rewire_consumer():
     assert replacements["aws_security_group.default_egress.id"] == "module.consul_firewalls.default_egress_id"
 
 
-# ---------------------------------------------------------------------------
-# _generate_tfvars_refactor
-# ---------------------------------------------------------------------------
-
-
 def test_tfvars_basic(sample_instance_ast, sample_instance_ast_modified, simple_diff_map):
     vars_tf, left_main, right_main, left_tfvars, right_tfvars, _ = (
         _generate_tfvars_refactor(
             sample_instance_ast, sample_instance_ast_modified, simple_diff_map
         )
     )
-    # Variable declared
     assert 'variable "ami"' in vars_tf
 
-    # Both main files inject var reference
     assert "${var.ami}" in left_main
     assert "${var.ami}" in right_main
 
-    # tfvars contain concrete values
     assert 'ami = "ami-12345"' in left_tfvars
     assert 'ami = "ami-67890"' in right_tfvars
 
@@ -309,10 +270,8 @@ def test_tfvars_reuses_existing_var_name():
     vars_tf, _, _, left_tfvars, right_tfvars, _ = _generate_tfvars_refactor(
         ast_left, ast_right, diff_map
     )
-    # Reused var name should still be declared for standalone validity.
     assert 'variable "my_ami"' in vars_tf
 
-    # Left tfvars has a comment (already a var ref), right has literal
     assert "# my_ami already comes from" in left_tfvars
     assert 'my_ami = "ami-999"' in right_tfvars
 

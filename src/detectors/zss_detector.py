@@ -16,6 +16,7 @@ from itertools import combinations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Too small = boilerplate, too large = ZSS becomes O(n^4)
 MIN_TREE_NODES = 100
 MAX_TREE_NODES = 500
 SIZE_DIFF_RATIO_THRESHOLD = 0.20
@@ -28,7 +29,6 @@ def _terminate_pool_now(executor: concurrent.futures.ProcessPoolExecutor) -> Non
     processes = getattr(executor, "_processes", None) or {}
     for proc in processes.values():
         if proc.is_alive():
-            # kill() is more reliable than terminate() for hard-stopping stuck workers on Windows.
             proc.kill()
     for proc in processes.values():
         proc.join(timeout=1)
@@ -85,7 +85,6 @@ def detect_clones_smart(
     skipped = 0
     clone_pairs = []
     
-    # 1. Parsing & Bucketing Phase
     for path in files:
         if timed_out():
             raise TimeoutError(f"Project analysis timed out after {timeout_seconds}s during parsing.")
@@ -100,7 +99,6 @@ def detect_clones_smart(
         tree = to_zss_tree(data)
         size = count_nodes(tree)
         
-        # Skip boilerplate and avoid pathological ZSS costs on very large trees.
         if size < MIN_TREE_NODES:
             skipped += 1
             emit_progress("parsing")
@@ -129,6 +127,7 @@ def detect_clones_smart(
             for (p1, t1, s1), (p2, t2, s2) in combinations(items, 2):
                 if p1 == p2:
                     continue
+                # Trees with very different sizes can't be clones
                 max_size = max(s1, s2, 1)
                 if (abs(s1 - s2) / max_size) > size_diff_ratio_threshold:
                     continue

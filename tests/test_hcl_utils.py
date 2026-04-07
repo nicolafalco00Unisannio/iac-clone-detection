@@ -3,9 +3,6 @@
 from src.utils.hcl_utils import _sanitize_var_name, _hcl_value
 
 
-# --- _sanitize_var_name ---
-
-
 def test_sanitize_simple():
     assert _sanitize_var_name("resource.aws_instance.web.ami") == "ami"
 
@@ -18,9 +15,6 @@ def test_sanitize_generic_name():
 def test_sanitize_generic_tags():
     result = _sanitize_var_name("resource.aws_instance.web.tags")
     assert result == "web_tags"
-
-
-# --- _hcl_value ---
 
 
 def test_hcl_value_bool():

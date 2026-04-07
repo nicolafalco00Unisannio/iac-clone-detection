@@ -107,7 +107,6 @@ def _choose_canonical_and_wrapper(path1_obj: Path, path2_obj: Path, ast1, ast2):
     if ast2_is_wrapper and not ast1_is_wrapper:
         return (path1_obj, ast1), (path2_obj, ast2)
 
-    # Stable fallback for equally-structured modules.
     return (path1_obj, ast1), (path2_obj, ast2)
 
 def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="clone_report.html"):
@@ -174,11 +173,10 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '<div class="container">'
     ]
 
-    # Statistics section
     total_files = len(set([p for pair in clone_pairs for p in [pair[0], pair[1]]]))
     total_groups = len(clone_groups)
     total_pairs = len(clone_pairs)
-    
+
     type_stats = get_clone_statistics(clone_pairs)
 
     html_parts.extend([
@@ -188,8 +186,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '<div class="stat-card"><h3>{}</h3><p>Files Involved</p></div>'.format(total_files),
         '</div>'
     ])
-    
-    # Detailed Type Stats
+
     html_parts.extend([
         '<div class="stats">',
         '<div class="stat-card"><h3 style="color:#28a745">{}</h3><p>Type 1 (Exact)</p></div>'.format(type_stats.get("Type 1 (Exact Clone)", 0)),
@@ -198,14 +195,12 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         '</div>'
     ])
 
-    # Navigation
     html_parts.extend([
         '<nav>',
         '<a href="#diffs"> Code Diffs & Refactoring</a>',
         '</nav>'
     ])
 
-    # Code Diffs Section
     html_parts.extend([
         '<div class="section" id="diffs">',
         '<h2> Code Comparisons & Refactoring Suggestions</h2>'
@@ -214,31 +209,27 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
     html_diff = difflib.HtmlDiff(tabsize=4, wrapcolumn=50)
     for i, group in enumerate(clone_groups):
         paths = sorted(list(group))
-        
-        # Determine group type dynamically based on the first pair
-        # (Assuming transitivity: if A~B is Type 2, and B~C is Type 2, group is likely Type 2)
+
         group_type = "Unknown"
         group_max_dist = 0
-        
+
         if len(paths) >= 2:
             p1, p2 = paths[0], paths[1]
-            
-            # Find the specific distance for this pair
+
             dist = 0
             for start, end, d in clone_pairs:
                 if (start == p1 and end == p2) or (start == p2 and end == p1):
                     dist = d
                     break
-            
+
             group_max_dist = dist
-            
-            # Parse only ONCE here for classification
+
             try:
                 ast1 = parse_file(p1)
                 ast2 = parse_file(p2)
                 group_type = classify_clone_type(dist, ast1, ast2)
             except OSError:
-                group_type = classify_clone_type(dist) # Fallback
+                group_type = classify_clone_type(dist)
 
         html_parts.append('<div class="clone-group">')
         html_parts.append(f'<h3>Clone Group {i+1} <span style="font-size:0.6em; color:#666; border:1px solid #ccc; padding:2px 6px; border-radius:4px; vertical-align:middle; margin-left:10px;">{group_type}</span></h3>')
@@ -246,7 +237,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
         for path in sorted(list(group)):
             html_parts.append(f'<li>{path}</li>')
         html_parts.append('</ul>')
-        
+
         for path1, path2 in combinations(sorted(list(group)), 2):
             try:
                 path1_obj = Path(path1)
@@ -255,7 +246,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                 with open(path1_obj, 'r', encoding='utf-8') as f1, open(path2_obj, 'r', encoding='utf-8') as f2:
                     file1_lines = f1.readlines()
                     file2_lines = f2.readlines()
-                
+
                 diff_table = html_diff.make_table(
                     file1_lines,
                     file2_lines,
@@ -269,17 +260,15 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                 )
             except OSError as e:
                 html_parts.append(f'<p> Could not generate diff: {e}</p>')
-        
-        # --- REFACTORING SUGGESTION LOGIC (Embedded) ---
+
         if len(group) >= 2:
             paths = sorted(list(group))
             path1, path2 = paths[0], paths[1]
             module_name = f"common_module_{i+1}"
-            
+
             html_parts.append('<details class="refactoring-details"><summary>View Refactoring Suggestion</summary><div class="refactoring-content">')
-            
+
             try:
-                # Type 3 check: If structural differences are too large, skip automated refactoring
                 if "Type 3" in group_type:
                     html_parts.append(
                         f'<h4>Manual Refactoring Recommended</h4>'
@@ -296,6 +285,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                         diff_map = _identify_param_differences(ast1, ast2)
 
                         if not diff_map:
+                            # 0 diffs → Type 1 identical → suggest wrapper module
                             path1_obj = Path(path1)
                             path2_obj = Path(path2)
                             (canonical_path, _canonical_ast), (wrapper_path, wrapper_ast) = _choose_canonical_and_wrapper(
@@ -328,9 +318,9 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                 f'<h5>Wrapper <code>outputs.tf</code></h5>'
                                 f'<div class="code-block"><pre>{wrapper["wrapper_outputs_tf"]}</pre></div>'
                             )
-                        
+
                         elif len(diff_map) < 2:
-                             # TFVars Strategy
+                            # 1 diff → .tfvars parameterization is enough
                             only_path = next(iter(diff_map.keys()))
 
                             bundle = _generate_tfvars_bundle(ast1, ast2, diff_map)
@@ -430,7 +420,7 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                     """)
 
                         else:
-                            # Module Strategy
+                            # 2+ diffs → extract a shared module
                             path1_obj = Path(path1)
                             path2_obj = Path(path2)
                             var_tf, main_tf, var_map, passthrough_vars = _generate_smart_module_tf(ast1, diff_map)
@@ -504,17 +494,16 @@ def generate_comprehensive_report(clone_pairs, clone_groups, output_filename="cl
                                     )
                     else:
                         html_parts.append('<p>Could not parse files for refactoring analysis.</p>')
-            
+
             except (OSError, ValueError, TypeError, KeyError) as e:
                 html_parts.append(f'<p>Error parsing or analyzing ASTs for refactoring: {e}</p>')
 
             html_parts.append('</div></details>')
-        
-        html_parts.append('</div>')
-    
-    html_parts.append('</div>') # Close container
 
-    # Write the file
+        html_parts.append('</div>')
+
+    html_parts.append('</div>')
+
     with open(output_filename, 'w', encoding='utf-8') as f:
         f.write('\n'.join(html_parts))
 

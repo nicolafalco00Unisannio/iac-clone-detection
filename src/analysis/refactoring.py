@@ -23,7 +23,6 @@ def _split_tfvars_eligible_diffs(diff_map):
     for path, details in diff_map.items():
         reason = None
 
-        # Terraform module source addresses must be literal strings at init time.
         if _MODULE_SOURCE_PATH_RE.match(path):
             reason = (
                 "module source must be a literal string "
@@ -78,19 +77,14 @@ def _render_hcl_recursive(node, variable_map, current_path="", indent_level=0, v
     lines = []
     var_types = var_types or {}
 
-    # If this leaf node is a known variableized path, emit a var reference.
     if current_path in variable_map:
         var_name = variable_map[current_path]
-        # Keep output compatible with legacy-style configs that heavily use interpolation strings.
-        # For non-string types we still emit interpolation; Terraform will coerce in many cases.
-        # (This is a generator; correctness > perfect typing.)
         return f'"${{var.{var_name}}}"'
 
     if isinstance(node, dict):
         for k, v in node.items():
             new_path = f"{current_path}.{k}" if current_path else k
 
-            # Special handling for top-level blocks to resemble Terraform syntax
             if indent_level == 0 and k in ["resource", "data", "module"]:
                 if isinstance(v, list):
                     for i, item in enumerate(v):
@@ -138,10 +132,9 @@ def _generate_smart_module_tf(ast1, diff_map):
     Returns:
       (variables_tf_str, main_tf_str, diff_variable_map, passthrough_vars)
     """
-    # 1) Variables created from actual differences (path -> var_name)
     variable_map = {}
     var_definitions = []
-    var_types = {}  # var_name -> terraform type string
+    var_types = {}
 
     used_var_names = set()
     signature_to_var = {}
@@ -154,11 +147,12 @@ def _generate_smart_module_tf(ast1, diff_map):
             diff_type,
         )
 
-        # Collapse repeated equivalent differences (same val1/val2/type) into one input variable.
+        # Diffs with same val1/val2/type → reuse same variable (dedup)
         if signature in signature_to_var:
             variable_map[path] = signature_to_var[signature]
             continue
 
+        # If one side already uses var.X, reuse that name
         preferred = _extract_single_var_name_from_value(details.get("val1")) or _extract_single_var_name_from_value(details.get("val2"))
         base_name = preferred or _sanitize_var_name(path)
 
@@ -179,10 +173,9 @@ def _generate_smart_module_tf(ast1, diff_map):
         var_def += "}\n"
         var_definitions.append(var_def)
 
-    # 2) Detect existing var.* references inside the code we are moving into the module
+    # Existing var.* refs in original code must be declared in the module and passed by caller
     referenced_vars = _extract_var_references(ast1)
 
-    # Don’t re-declare variables we already created for differences
     diff_var_names = set(variable_map.values())
 
     passthrough_vars = {}
@@ -197,7 +190,6 @@ def _generate_smart_module_tf(ast1, diff_map):
             f"}}\n"
         )
 
-    # 3) Render the module main.tf using AST1 as skeleton
     main_tf_content = _render_hcl_recursive(ast1, variable_map, var_types=var_types)
 
     return "\n".join(var_definitions), main_tf_content, variable_map, passthrough_vars
@@ -215,7 +207,6 @@ def _generate_smart_module_call(module_name, diff_map, variable_map, specific_as
         f'  source = "./modules/{module_name}"'
     ]
 
-    # Parameters that actually differ
     assigned_vars = set()
     for path, var_name in variable_map.items():
         if var_name in assigned_vars:
@@ -224,9 +215,7 @@ def _generate_smart_module_call(module_name, diff_map, variable_map, specific_as
         call_lines.append(f"  {var_name} = {_hcl_value(val)}")
         assigned_vars.add(var_name)
 
-    # Variables already used in the code (must be passed through)
     for name in sorted(passthrough_vars.keys()):
-        # Use interpolation to stay consistent with legacy-style configs
         call_lines.append(f'  {name} = "${{var.{name}}}"')
 
     call_lines.append("}")
@@ -292,6 +281,7 @@ def _rewrite_consumer_hcl(hcl_text, ref_output_map, module_name):
     rewritten = hcl_text
     replacements = {}
 
+    # Sort by length descending to avoid partial replacements
     for old_ref, output_name in sorted(ref_output_map.items(), key=lambda item: len(item[0]), reverse=True):
         new_ref = f"module.{module_name}.{output_name}"
         pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(old_ref)}(?![A-Za-z0-9_])")
@@ -305,50 +295,37 @@ def _rewrite_consumer_hcl(hcl_text, ref_output_map, module_name):
 def _generate_module_tf(base_ast, differences):
     """Generates the HCL for a new Terraform module."""
     variables = {}
-    # Naively create variable names from the diff path
     for diff in differences:
-        # Example diff: "Value differs at '.resource.aws_instance.web.instance_type': ('t2.micro' vs 't2.large')"
         try:
             path_part = diff.split("'")[1]
-            # A simple heuristic for variable names
             var_name = path_part.split('.')[-1]
             variables[var_name] = {'path': path_part}
         except IndexError:
             continue
 
-    # --- Generate variables.tf content ---
     var_tf_lines = ['# variables.tf for the new module\n']
     for name in sorted(variables.keys()):
         var_tf_lines.append(f'variable "{name}" {{')
         var_tf_lines.append('  description = "Autogenerated variable"')
         var_tf_lines.append('}\n')
 
-    # --- Generate main.tf content (very simplified) ---
-    # This is a complex task. For this example, we'll just show the concept
-    # by replacing values in a string representation of the original resource.
-    # A real implementation would need a robust HCL generator.
     main_tf_lines = ['# main.tf for the new module\n']
-    
-    # Handle that 'resource' can be a list of dicts or a single dict
+
     resource_block = base_ast.get('resource')
     if isinstance(resource_block, list):
-        resource_block = resource_block[0] # Use the first resource block as a template
-    
-    # Let's find the first resource block to use as a template
+        resource_block = resource_block[0]
+
     resource_key = next((k for k in resource_block), None) if resource_block else None
     if resource_key:
         resource_name = next(iter(resource_block[resource_key]), None)
         if resource_name:
-            # Crude representation of the resource
             main_tf_lines.append(f'resource "{resource_key}" "{resource_name}" {{')
-            
-            # The resource block can be a list with one dict or just the dict
+
             resource_attributes = resource_block[resource_key][resource_name]
             if isinstance(resource_attributes, list):
                 resource_attributes = resource_attributes[0]
 
             for key, value in resource_attributes.items():
-                 # Check if this attribute is a variable
                 is_variable = False
                 for var_name, var_info in variables.items():
                     if var_info['path'].endswith(f'.{key}'):
@@ -356,7 +333,7 @@ def _generate_module_tf(base_ast, differences):
                         is_variable = True
                         break
                 if not is_variable:
-                    main_tf_lines.append(f'  {key} = "{value}"') # Note: simplistic quoting
+                    main_tf_lines.append(f'  {key} = "{value}"')
             main_tf_lines.append('}')
 
     return '\n'.join(var_tf_lines), '\n'.join(main_tf_lines)
@@ -364,13 +341,12 @@ def _generate_module_tf(base_ast, differences):
 def _generate_module_call(module_name, differences, _original_values):
     """Generates the HCL for calling the new module."""
     call_lines = [f'module "{module_name}" {{', '  source = "./modules/{module_name}"\n']
-    
+
     variables = {}
     for diff in differences:
         try:
             path_part = diff.split("'")[1]
             var_name = path_part.split('.')[-1]
-            # Extract the first value as an example
             value = diff.split("'")[3]
             variables[var_name] = value
         except IndexError:
@@ -430,7 +406,6 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
             variable_map[path] = signature_to_var[signature]
             continue
 
-        # Prefer reusing an existing variable reference if present on either side
         preferred = _extract_single_var_name_from_value(v1) or _extract_single_var_name_from_value(v2)
 
         if preferred:
@@ -448,10 +423,6 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
         variable_map[path] = var_name
         var_types[var_name] = diff_type
 
-        # Always declare variables referenced by the generated shared template.
-        # Reused names (detected via existing var.<name> references) may not have
-        # a matching variables.tf in the target location, which causes runtime
-        # errors like "unknown variable referenced".
         var_definitions.append(
             f'variable "{var_name}" {{\n'
             f'  description = "Refactored from {path}"\n'
@@ -464,7 +435,6 @@ def _generate_tfvars_refactor(ast_left, ast_right, diff_map):
     left_main_tf_str = _render_hcl_recursive(ast_left, variable_map, var_types=var_types)
     right_main_tf_str = _render_hcl_recursive(ast_right, variable_map, var_types=var_types)
 
-    # tfvars: emit only literal values; skip those that already were var.* on that side
     left_tfvars_lines = []
     right_tfvars_lines = []
     left_assigned = set()
@@ -550,7 +520,6 @@ def _generate_wrapper_module_suggestion(
     output_names = output_names or []
     passthrough_vars = sorted(_extract_var_references(ast_template) - set(fixed_inputs.keys()))
 
-    # Generate wrapper variables.tf to declare all passthrough variables
     var_blocks = []
     for name in passthrough_vars:
         var_blocks.append(

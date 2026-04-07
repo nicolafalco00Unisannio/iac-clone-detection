@@ -25,17 +25,15 @@ IGNORED_TOP_LEVEL_KEYS = {
 
 def _normalize_address_for_module_refactor(address: str) -> str:
     """Normalize addresses to ignore module wrapping for refactoring comparisons.
-    
+
     Converts:
       - "module.impl.resource_type.name" -> "resource_type.name"
-    
-    This allows equivalence checks to recognize that extracting resources into 
+
+    This allows equivalence checks to recognize that extracting resources into
     a module is semantically equivalent if the attributes remain unchanged.
     """
     parts = address.split(".")
-    # If address starts with "module", skip module parts and return just resource type and name
     if parts[0] == "module" and len(parts) > 2:
-        # module.impl.resource_type.name -> resource_type.name
         return ".".join(parts[-2:])
     return address
 
@@ -82,7 +80,7 @@ def _semantic_view(
     normalize_label_separators: bool = False,
 ) -> dict[str, Any]:
     """Extract a semantic view of a Terraform plan for equivalence checks.
-    
+
     Args:
         plan: The Terraform plan dict to process
         include_output_changes: Whether to include output_changes in comparison
@@ -106,7 +104,7 @@ def _semantic_view(
         name = item.get("name")
         if normalize_label_separators and isinstance(name, str):
             name = _normalize_label_separators(name)
-        
+
         resource_changes.append(
             {
                 "address": address,
@@ -150,7 +148,7 @@ def _load_plan_json(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     payload = file_path.read_bytes()
 
-    # PowerShell redirection often produces UTF-16 LE with BOM.
+    # PowerShell on Windows often produces UTF-16 LE with BOM
     for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
         try:
             return json.loads(payload.decode(encoding))
@@ -167,12 +165,12 @@ def _load_plan_json(path: str | Path) -> dict[str, Any]:
 
 def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
     """Parse a Terraform plan TXT file from `terraform show` output.
-    
+
     Converts the text format to a dict structure compatible with JSON plan format.
     """
     file_path = Path(path)
     content = file_path.read_text(encoding="utf-8", errors="ignore")
-    
+
     resource_changes: list[dict[str, Any]] = []
     output_changes: dict[str, dict[str, Any]] = {}
     current_resource: Optional[dict[str, Any]] = None
@@ -180,13 +178,11 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
     current_attrs: dict[str, Any] = {}
     in_resources_section = False
     in_outputs_section = False
-    
+
     for line in content.split("\n"):
-        # Skip empty lines
         if not line.strip():
             continue
-        
-        # Detect sections
+
         if line.strip().startswith("Plan:"):
             if current_resource:
                 current_resource["change"]["after"] = current_attrs
@@ -199,7 +195,7 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
             in_resources_section = False
             in_outputs_section = False
             continue
-            
+
         if "Changes to Outputs:" in line:
             if current_resource:
                 current_resource["change"]["after"] = current_attrs
@@ -209,15 +205,13 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
             in_resources_section = False
             in_outputs_section = True
             continue
-            
+
         if "Terraform will perform the following actions:" in line:
             in_resources_section = True
             in_outputs_section = False
             continue
-            
+
         if in_outputs_section:
-            # Parse output lines
-            # Example: "  + myoutput = {" or "  ~ otheroutput ="
             match = re.match(r"^\s*([\+\-~<=]+)\s+([^\s]+)\s+=", line)
             if match:
                 if current_output:
@@ -236,23 +230,19 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                     if val != "(known after apply)":
                         current_attrs[key] = val
                     else:
-                        current_attrs[key] = True  # treat known after apply loosely
+                        current_attrs[key] = True
             continue
-        
+
         if not in_resources_section:
             continue
-            
-        # Skip comment lines but capture resource addresses from them
+
         if line.strip().startswith("#") and " will be " in line:
-            # Parse address from comment
             comment = line.strip()[2:].split(" will be ")[0].strip()
-            
-            # Save previous resource if exists
+
             if current_resource:
                 current_resource["change"]["after"] = current_attrs
                 resource_changes.append(current_resource)
-            
-            # Extract action from comment
+
             if " will be created" in line:
                 actions = ["create"]
             elif " will be updated" in line:
@@ -263,26 +253,22 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                 actions = ["read"]
             else:
                 actions = ["update"]
-            
-            # Parse the address to extract mode, type, and name
+
             parts = comment.split(".")
             if len(parts) >= 2:
-                # Could be "resource.name" or "module.X.resource.name"
                 if parts[0] == "module":
-                    # module.impl.harness_platform_input_set.inputset
                     resource_type = parts[-2]
                     resource_name = parts[-1]
                     address = comment
                 else:
-                    # resource.name format
                     resource_type = parts[-2]
                     resource_name = parts[-1]
                     address = comment
-                
+
                 mode = "data" if resource_type.startswith("data.") else "managed"
                 if mode == "data":
                     resource_type = resource_type.replace("data.", "")
-                
+
                 current_resource = {
                     "address": address,
                     "mode": mode,
@@ -298,22 +284,18 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                 }
                 current_attrs = {}
             continue
-        
-        # Parse resource block line (e.g., "+ resource "harness_platform_input_set" "inputset" {")
+
         match = re.match(r"^\s*([\+\-~<=]+)\s+resource\s+\"([^\"]+)\"\s+\"([^\"]+)\"", line)
         if match:
             action_str, resource_type, resource_name = match.groups()
-            
-            # If we already captured this from comment, do nothing
+
             if current_resource and current_resource["name"] == resource_name and current_resource["type"] == resource_type:
-                pass  # Already processed from comment
+                pass
             else:
-                # Save previous resource if exists
                 if current_resource:
                     current_resource["change"]["after"] = current_attrs
                     resource_changes.append(current_resource)
-                
-                # Map action strings to terraform actions
+
                 action_map = {
                     "+": ["create"],
                     "-": ["delete"],
@@ -323,7 +305,7 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                     ">": ["create"],
                 }
                 actions = action_map.get(action_str[0], ["update"])
-                
+
                 current_resource = {
                     "address": f"{resource_type}.{resource_name}",
                     "mode": "managed",
@@ -338,29 +320,23 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                     }
                 }
                 current_attrs = {}
-        
-        # Parse attribute lines (indented with spaces, but within resource block)
+
         elif current_resource and re.match(r"^\s{2,}\S+", line):
             attr_line = line.strip()
-            # Skip structural lines
             if attr_line in ("{", "}", "[", "]", "("):
                 continue
-            
+
             if "=" in attr_line:
-                # Extract key and value
                 parts = attr_line.split("=", 1)
                 key = parts[0].strip()
                 value = parts[1].strip() if len(parts) > 1 else ""
-                
-                # Skip complex structures for now
+
                 if value in ("{", "[", "<<-EOT"):
                     continue
-                
-                # Handle different value formats
+
                 if value == "(known after apply)":
                     value = None
                 elif value.startswith('"') and value.endswith('"'):
-                    # Remove quotes and unescape
                     value = value[1:-1].replace('\\"', '"')
                 elif value == "false":
                     value = False
@@ -368,17 +344,15 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
                     value = True
                 elif value.isdigit():
                     value = int(value)
-                
+
                 current_attrs[key] = value
-    
-    # Don't forget the last resource or output
+
     if current_resource:
         current_resource["change"]["after"] = current_attrs
         resource_changes.append(current_resource)
     if current_output:
         output_changes[current_output] = {"actions": ["create"], "after": current_attrs, "after_unknown": {}}
-    
-    # Return a dict structure compatible with JSON plan format
+
     return {
         "resource_changes": resource_changes,
         "output_changes": output_changes,
@@ -388,14 +362,12 @@ def _parse_plan_txt(path: str | Path) -> dict[str, Any]:
 def _load_plan_file(path: str | Path) -> dict[str, Any]:
     """Load a Terraform plan file (JSON or TXT format)."""
     file_path = Path(path)
-    
-    # Try JSON first
+
     try:
         return _load_plan_json(file_path)
     except ValueError:
         pass
-    
-    # Try TXT format
+
     try:
         return _parse_plan_txt(file_path)
     except Exception as e:
@@ -415,10 +387,10 @@ def compare_plan_dicts(
     normalize_label_separators: bool = False,
 ) -> PlanComparisonResult:
     """Compare two Terraform plans represented as Python dicts.
-    
+
     Args:
         baseline_plan: The baseline plan dict
-        candidate_plan: The candidate plan dict  
+        candidate_plan: The candidate plan dict
         include_output_changes: Whether to include output_changes
         strict: Whether to compare after_unknown fields
         normalize_modules: If True, ignore module wrapping differences.
@@ -456,7 +428,7 @@ def compare_plan_files(
     normalize_label_separators: bool = False,
 ) -> PlanComparisonResult:
     """Load plan files (JSON or TXT format) and compare them semantically.
-    
+
     Args:
         baseline_path: Path to baseline plan file
         candidate_path: Path to candidate plan file

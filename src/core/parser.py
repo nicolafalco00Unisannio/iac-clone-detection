@@ -25,6 +25,5 @@ def parse_file(path):
             elif path.suffix == '.json':
                 return json.load(f)
     except Exception as e:
-        # Logging ridotto per non intasare la console con errori di parsing comuni
         logging.debug(f"Skipping {path.name}: Parsing failed ({e})")
         return None

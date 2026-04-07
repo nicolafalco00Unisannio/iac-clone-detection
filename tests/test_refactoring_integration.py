@@ -28,10 +28,6 @@ from src.analysis.refactoring import (
 )
 from src.core.parser import parse_file
 
-# ---------------------------------------------------------------------------
-# Terraform source fixtures — a minimal Type-2 clone pair
-# ---------------------------------------------------------------------------
-
 LEFT_TF = """\
 resource "aws_instance" "web" {
   ami           = "ami-11111"
@@ -56,13 +52,8 @@ resource "aws_instance" "web" {
 }
 """
 
-# Regex to collect every var.<name> reference in a raw HCL string
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)\b")
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _collect_declared_variables(variables_tf_str: str) -> set[str]:
     """Parse variable declarations from a variables.tf string."""
@@ -90,10 +81,6 @@ def _terraform_available() -> bool:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
-
-# ---------------------------------------------------------------------------
-# Shared fixture: two clone .tf files + their parsed ASTs + diff map
-# ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def clone_setup(tmp_path):
@@ -125,10 +112,6 @@ def clone_setup(tmp_path):
         "tmp_path": tmp_path,
     }
 
-
-# ---------------------------------------------------------------------------
-# Tests: _generate_smart_module_tf + _generate_smart_module_call
-# ---------------------------------------------------------------------------
 
 class TestModuleRefactoring:
 
@@ -254,10 +237,6 @@ class TestModuleRefactoring:
             f"`terraform fmt -check` reported formatting issues:\n{result.stdout}\n{result.stderr}"
         )
 
-
-# ---------------------------------------------------------------------------
-# Tests: _generate_tfvars_refactor
-# ---------------------------------------------------------------------------
 
 class TestTfvarsRefactoring:
 

@@ -8,9 +8,6 @@ from src.analysis.diff_analyzer import (
 )
 
 
-# --- classify_clone_type ---
-
-
 def test_classify_type1():
     assert classify_clone_type(0) == "Type 1 (Exact Clone)"
 
@@ -27,7 +24,6 @@ def test_classify_type2(sample_instance_ast, sample_instance_ast_modified):
 
 
 def test_classify_type3(sample_instance_ast, sample_instance_ast_structural_diff):
-    # Structural diff adds the "monitoring" key → extra edits beyond param diffs
     result = classify_clone_type(
         10, sample_instance_ast, sample_instance_ast_structural_diff
     )
@@ -37,9 +33,6 @@ def test_classify_type3(sample_instance_ast, sample_instance_ast_structural_diff
 def test_classify_no_asts():
     result = classify_clone_type(3, None, None)
     assert result == "Type 3 (Near-miss Clone)"
-
-
-# --- _identify_param_differences ---
 
 
 def test_identify_params_identical():
@@ -64,9 +57,6 @@ def test_identify_params_type_mismatch():
     assert diffs == {}
 
 
-# --- _infer_type ---
-
-
 def test_infer_type_bool():
     assert _infer_type(True) == "bool"
 
@@ -81,9 +71,6 @@ def test_infer_type_number():
 
 def test_infer_type_list():
     assert _infer_type([1, 2]) == "list(any)"
-
-
-# --- _find_ast_diff ---
 
 
 def test_find_ast_diff_identical():

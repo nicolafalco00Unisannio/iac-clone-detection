@@ -82,35 +82,30 @@ def sample_instance_ast_structural_diff():
 @pytest.fixture
 def tmp_tf_dir(tmp_path):
     """Temporary directory with valid and invalid .tf files for file_finder tests."""
-    # Valid file with resource block
     valid = tmp_path / "main.tf"
     valid.write_text(
         'resource "aws_instance" "web" {\n  ami = "ami-123"\n  instance_type = "t2.micro"\n}\n',
         encoding="utf-8",
     )
 
-    # Another valid file with module block
     valid_module = tmp_path / "network.tf"
     valid_module.write_text(
         'module "vpc" {\n  source = "./modules/vpc"\n}\n',
         encoding="utf-8",
     )
 
-    # variables.tf — should be ignored
     variables = tmp_path / "variables.tf"
     variables.write_text(
         'variable "region" {\n  default = "us-east-1"\n}\n',
         encoding="utf-8",
     )
 
-    # File without resource/module — should be ignored
     locals_file = tmp_path / "locals.tf"
     locals_file.write_text(
         'locals {\n  env = "dev"\n}\n',
         encoding="utf-8",
     )
 
-    # .terraform directory — should be ignored
     terraform_dir = tmp_path / ".terraform" / "modules"
     terraform_dir.mkdir(parents=True)
     vendor = terraform_dir / "main.tf"

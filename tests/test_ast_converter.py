@@ -14,7 +14,6 @@ def test_simple_dict():
     tree = to_zss_tree({"ami": "ami-123"})
     assert tree.label == "root"
     assert len(tree.children) == 1
-    # Leaf: key "ami" is consumed as label param, but overridden by VAL: prefix
     assert tree.children[0].label == "VAL:ami-123"
 
 
@@ -24,7 +23,6 @@ def test_nested_dict():
     tree = to_zss_tree(data)
     tags_node = tree.children[0]
     assert tags_node.label == "tags"
-    # Children are leaf values (sorted keys: Env, Name → VAL:dev, VAL:web)
     assert len(tags_node.children) == 2
     assert tags_node.children[0].label == "VAL:dev"
     assert tags_node.children[1].label == "VAL:web"
@@ -44,7 +42,6 @@ def test_list_conversion():
 def test_leaf_values():
     data = {"count": 3}
     tree = to_zss_tree(data)
-    # Leaf directly under root
     assert tree.children[0].label == "VAL:3"
 
 
@@ -54,7 +51,6 @@ def test_count_nodes_single():
 
 
 def test_count_nodes_tree():
-    # root -> VAL:ami-123 = 2 nodes (leaf value replaces key node)
     data = {"ami": "ami-123"}
     tree = to_zss_tree(data)
     assert count_nodes(tree) == 2
